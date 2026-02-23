@@ -96,6 +96,7 @@ def generate_latents(n, dim_names, corr_matrix=None, seed=42):
         Z = rng.standard_normal(size=(n, k))
     else:
         R = np.array(corr_matrix, dtype=float)
+        # 防止数值问题，强制对称 + 半正定
         R = (R + R.T) / 2.0
         w, V = np.linalg.eigh(R)
         w[w < 1e-8] = 1e-8
@@ -108,7 +109,7 @@ def generate_latents(n, dim_names, corr_matrix=None, seed=42):
 def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
     """
     中介模型：A -> C -> B
-    使 C 和 B 的方差尽量接近 1，使相关结构更“可控”和接近设定路径。
+    a、b、cprime 可以为负，函数会自动保证 C、B 的方差处在合理范围。
     """
     rng = np.random.default_rng(seed)
     n = len(df_latents)
@@ -249,7 +250,7 @@ with tabs[1]:
                 "dimensions": {
                     "A_dim": [q for q in all_qids if default_start <= q < default_start + 10],
                 },
-                # 新增：小维度（按大维度划分），默认空
+                # 小维度（按大维度划分），默认空
                 "subdimensions": {},
                 "demo": {
                     # 是否启用
@@ -271,7 +272,8 @@ with tabs[1]:
                     "loading": 0.80,
                     "noise": 0.75,
                 },
-                "corr_constraint": {"d1": "A_dim", "d2": "A_dim", "rho": 0.0},
+                # 默认相关矩阵先留空，在 Tab3 按当前维度数量初始化
+                "corr_matrix": None,
                 "mediation": {
                     "A": "A_dim",
                     "C": "A_dim",
@@ -362,19 +364,15 @@ with tabs[1]:
             st.session_state.config = cfg
             st.rerun()
         else:
-            # —— 这里是修好的版本：只要有名字，就保留维度，题目可以暂时为空 ——
+            # 修复“新增维度有时加不上”的问题：只要有名字就保留，题目可以暂时为空
             new_dims = {}
             for i, (orig_name, qid_list) in enumerate(dims_items):
-                # 名称：优先用用户当前在输入框里的；如果为空就用原来的
                 name = st.session_state.get(f"dim_name_{i}", "").strip() or orig_name
-                # 题目列表：如果当前 multiselect 还没产生值，就沿用原来的 qid_list
                 items = st.session_state.get(f"dim_items_{i}", None)
                 if items is None:
                     items = qid_list
-                # 只要有名字就保留这个维度（题目可以暂时为空，以后再选）
                 if name:
                     new_dims[name] = sorted(set(items))
-
             cfg["dimensions"] = new_dims
 
         if not cfg["dimensions"]:
@@ -382,11 +380,11 @@ with tabs[1]:
         else:
             st.success(f"当前共有 {len(cfg['dimensions'])} 个大维度。")
 
-        # ------- 新增：小维度设置 -------
+        # ------- 小维度设置 -------
         st.markdown("### 小维度设置（可选，大维度内部再分）")
         st.caption(
             "每个大维度下可以再划分若干小维度。每行格式：小维度名称:题号,题号,题号\n"
-            "小维度的题目必须是该大维度内已有的题目，否则会被忽略。"
+            "支持中英文冒号/逗号；小维度的题目必须是该大维度内已有的题目，否则会被忽略。"
         )
 
         subdims_all = cfg.get("subdimensions", {})
@@ -417,6 +415,8 @@ with tabs[1]:
                     line = line.strip()
                     if not line:
                         continue
+                    # 支持全角 -> 半角
+                    line = line.replace("：", ":").replace("，", ",")
                     if ":" not in line:
                         continue
                     name_part, q_part = line.split(":", 1)
@@ -679,7 +679,7 @@ with tabs[1]:
 
 # ---------- Tab 3: 关系约束 ----------
 with tabs[2]:
-    st.subheader("关系约束：各人口学差异・维度相关・中介模型")
+    st.subheader("关系约束：各人口学差异・维度相关矩阵・中介模型")
     cfg = st.session_state.config
     qs = st.session_state.questions
     if not cfg or not qs:
@@ -749,24 +749,46 @@ with tabs[2]:
                 }
             cfg["demo_effects"] = new_demo_effects
 
-            # ---- 维度相关 ----
-            st.markdown("### 维度相关（设置一对维度的相关系数）")
-            cc = cfg.get("corr_constraint", {})
-            d1_default = cc.get("d1", dims[0])
-            if d1_default not in dims:
-                d1_default = dims[0]
-            d2_default = cc.get("d2", dims[min(1, len(dims) - 1)])
-            if d2_default not in dims:
-                d2_default = dims[min(1, len(dims) - 1)]
-            rho_default = float(cc.get("rho", 0.0))
+            # ---- 维度相关：完整相关矩阵 ----
+            st.markdown("### 维度相关矩阵（任意两个维度之间可设相关）")
+            st.caption(
+                "对角线固定为 1。你可以编辑上三角或整个矩阵，程序会自动对称化并裁剪到 [-0.95, 0.95]。"
+            )
 
-            d1 = st.selectbox("维度 A", dims, index=dims.index(d1_default), key="corr_d1")
-            d2 = st.selectbox("维度 B", dims, index=dims.index(d2_default), key="corr_d2")
-            rho = st.slider("期望相关系数 ρ", -0.9, 0.9, rho_default, 0.05)
-            cfg["corr_constraint"] = {"d1": d1, "d2": d2, "rho": float(rho)}
+            k = len(dims)
+            cm = cfg.get("corr_matrix")
+
+            if (
+                isinstance(cm, list)
+                and len(cm) == k
+                and all(isinstance(row, list) and len(row) == k for row in cm)
+            ):
+                try:
+                    base_mat = np.array(cm, dtype=float)
+                except Exception:
+                    base_mat = np.eye(k)
+            else:
+                base_mat = np.eye(k)
+
+            df_corr = pd.DataFrame(base_mat, index=dims, columns=dims)
+
+            df_corr_edit = st.data_editor(
+                df_corr,
+                num_rows="fixed",
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # 后处理：强制对角线=1，对称化 + 裁剪
+            M = df_corr_edit.values.astype(float)
+            for i in range(k):
+                M[i, i] = 1.0
+            M = (M + M.T) / 2.0
+            M = np.clip(M, -0.95, 0.95)
+            cfg["corr_matrix"] = M.tolist()
 
             # ---- 中介模型 ----
-            st.markdown("### 中介：A→C→B")
+            st.markdown("### 中介：A→C→B（路径可正可负）")
             med = cfg.get("mediation", {})
             A_default = med.get("A", dims[0])
             C_default = med.get("C", dims[min(1, len(dims) - 1)])
@@ -791,11 +813,13 @@ with tabs[2]:
             a_default = float(med.get("a", 0.6))
             b_default = float(med.get("b", 0.6))
             cprime_default = float(med.get("cprime", 0.2 if med_type == "部分中介" else 0.0))
-            a = st.slider("路径 a（A→C）", 0.0, 1.2, a_default, 0.05)
-            b_path = st.slider("路径 b（C→B）", 0.0, 1.2, b_default, 0.05)
-            cprime = 0.0 if med_type == "完全中介" else st.slider(
-                "直接效应 c'（A→B）", 0.0, 1.2, cprime_default, 0.05
-            )
+
+            a = st.slider("路径 a（A→C，可正可负）", -1.2, 1.2, a_default, 0.05)
+            b_path = st.slider("路径 b（C→B，可正可负）", -1.2, 1.2, b_default, 0.05)
+            cprime = 0.0
+            if med_type == "部分中介":
+                cprime = st.slider("直接效应 c'（A→B，可正可负）", -1.2, 1.2, cprime_default, 0.05)
+
             cfg["mediation"] = {
                 "A": A,
                 "C": C,
@@ -834,14 +858,19 @@ with tabs[3]:
             if scale_start_qid > max_qid:
                 scale_start_qid = max_qid
 
-            # 相关矩阵
+            # 相关矩阵：优先使用 corr_matrix
             k = len(dim_names)
             R = np.eye(k)
-            cc = cfg.get("corr_constraint")
-            if cc and cc.get("d1") in dim_names and cc.get("d2") in dim_names:
-                i = dim_names.index(cc["d1"])
-                j = dim_names.index(cc["d2"])
-                R[i, j] = R[j, i] = float(cc.get("rho", 0.0))
+            cm = cfg.get("corr_matrix")
+            if (
+                isinstance(cm, list)
+                and len(cm) == k
+                and all(isinstance(row, list) and len(row) == k for row in cm)
+            ):
+                try:
+                    R = np.array(cm, dtype=float)
+                except Exception:
+                    R = np.eye(k)
 
             if st.button("生成数据", type="primary"):
                 rng = np.random.default_rng(seed)
@@ -1010,7 +1039,6 @@ with tabs[3]:
                             qcols = [f"Q{qid}" for qid in qids if f"Q{qid}" in out.columns]
                             if not qcols:
                                 continue
-                            # 变量名：大维度_小维度_mean（去掉小维度名里的空格/特殊字符）
                             safe_sub = re.sub(r"\W+", "", sub_name)
                             col_name = f"{big_dim}_{safe_sub}_mean"
                             out[col_name] = out[qcols].mean(axis=1)

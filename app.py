@@ -1,4 +1,7 @@
-import io, re, json, math
+import io
+import re
+import json
+import math
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -34,9 +37,10 @@ D符合
 E非常符合
 """
 
-# Optional: write .sav if pyreadstat is installed
+# 可选：写 .sav（如果安装了 pyreadstat）
 try:
     import pyreadstat
+
     HAS_PYREADSTAT = True
 except Exception:
     HAS_PYREADSTAT = False
@@ -44,12 +48,15 @@ except Exception:
 st.set_page_config(page_title="问卷解析 + SPSS数据生成器", layout="wide")
 
 
+# ---------- 基础函数 ----------
+
 def parse_survey_text(txt: str):
+    """解析问卷文本为题目列表"""
     lines = [l.strip() for l in txt.splitlines() if l.strip()]
     questions = []
     i = 0
-    q_pat = re.compile(r'^(\d+)\s*[\.、]\s*(.+)$')
-    opt_pat = re.compile(r'^([A-E])\s*[\.、]?\s*(.+)$')
+    q_pat = re.compile(r"^(\d+)\s*[\.、]\s*(.+)$")
+    opt_pat = re.compile(r"^([A-E])\s*[\.、]?\s*(.+)$")
     cur = None
     while i < len(lines):
         m = q_pat.match(lines[i])
@@ -58,6 +65,7 @@ def parse_survey_text(txt: str):
                 questions.append(cur)
             cur = {"qid": int(m.group(1)), "stem": m.group(2).strip(), "options": {}}
             i += 1
+            # 继续往下读选项
             while i < len(lines) and not q_pat.match(lines[i]):
                 om = opt_pat.match(lines[i])
                 if om and cur is not None:
@@ -67,6 +75,8 @@ def parse_survey_text(txt: str):
         i += 1
     if cur:
         questions.append(cur)
+
+    # 简单识别量表类型
     for q in questions:
         opts = " ".join(q["options"].values())
         if any(k in opts for k in ["非常不符合", "不符合", "不确定", "符合", "非常符合"]):
@@ -79,6 +89,7 @@ def parse_survey_text(txt: str):
 
 
 def generate_latents(n, dim_names, corr_matrix=None, seed=42):
+    """生成大维度潜变量，带相关结构"""
     rng = np.random.default_rng(seed)
     k = len(dim_names)
     if corr_matrix is None:
@@ -95,25 +106,26 @@ def generate_latents(n, dim_names, corr_matrix=None, seed=42):
 
 
 def apply_group_effect(df_latents, group, target_dim, beta):
+    """性别等分组效应：在目标维度上加一个 β*group"""
     df_latents[target_dim] = df_latents[target_dim] + beta * group
     return df_latents
 
 
 def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
     """
-    A -> C -> B 中介模型
-    这里让 C 和 B 的方差尽量保持为 1，使得相关系数更接近“真实”路径系数。
+    中介模型：A -> C -> B
+    使 C 和 B 的方差尽量接近 1，使相关结构更“可控”和接近设定路径。
     """
     rng = np.random.default_rng(seed)
     n = len(df_latents)
 
-    # A 已经是标准正态（generate_latents 生成的）
-    # 构造 C，使 Var(C) ≈ 1
+    # A 来自 generate_latents，近似 N(0,1)
+    # 构造 C
     eC = rng.standard_normal(n)
     var_eC = max(1e-6, 1.0 - a * a)
     df_latents[C] = a * df_latents[A] + math.sqrt(var_eC) * eC
 
-    # 构造 B，使 Var(B) ≈ 1
+    # 构造 B
     # Var(b*C + c'*A) ≈ b^2 + c'^2 + 2ab c'
     var_struct = b * b + cprime * cprime + 2 * a * b * cprime
     var_struct = max(0.0, min(var_struct, 1.0 - 1e-6))
@@ -125,18 +137,14 @@ def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
 
 
 def latent_to_items(latent, n_items, mean=3.6, loading=0.8, noise=0.75, seed=42):
-    """
-    将连续潜变量映射为 1-5 的李克特题目。
-    mean: 平均分
-    loading: 潜变量载荷（相关强度）
-    noise: 题目噪声（越大越分散）
-    """
+    """潜变量 → 1~5 李克特题目"""
     rng = np.random.default_rng(seed)
     cont = mean + loading * latent[:, None] + rng.standard_normal(size=(len(latent), n_items)) * noise
     return np.clip(np.rint(cont), 1, 5).astype(int)
 
 
 def make_spss_syntax_for_csv(csv_filename, df_cols, var_labels, value_labels):
+    """生成 SPSS 导入 + 标签语法"""
     var_lines = []
     for col in df_cols:
         if col == "ID":
@@ -177,15 +185,16 @@ EXECUTE.
 """
 
 
+# ---------- session_state 初始化 ----------
 if "questions" not in st.session_state:
     st.session_state.questions = []
 if "config" not in st.session_state:
     st.session_state.config = {}
 
 st.title("问卷解析 + 维度/关系约束 + SPSS数据生成器（本地网页）")
-tabs = st.tabs(["1) 导入/解析问卷", "2) 维度与计分配置", "3) 关系约束（差异/相关/中介）", "4) 生成与导出"])
+tabs = st.tabs(["1) 导入/解析问卷", "2) 维度与计分 & 人口学", "3) 关系约束（差异/相关/中介）", "4) 生成与导出"])
 
-# ---------------- Tab 1: 解析问卷 ----------------
+# ---------- Tab 1: 导入/解析 ----------
 with tabs[0]:
     st.subheader("粘贴问卷文本 → 自动识别题号/题干/选项")
     raw = st.text_area("问卷文本", value=st.session_state.get("raw_text", ""), height=320)
@@ -215,207 +224,386 @@ with tabs[0]:
         ).sort_values("qid")
         st.dataframe(dfq, use_container_width=True)
 
-# ---------------- Tab 2: 维度与计分配置 ----------------
+# ---------- Tab 2: 维度、人 口学、题目参数 ----------
 with tabs[1]:
-    st.subheader("配置：维度归属、反向题、样本量")
+    st.subheader("配置：维度归属、反向题、人口学 & 题目分布")
     qs = st.session_state.questions
     if not qs:
         st.info("先到第 1 页解析问卷。")
     else:
-        # 首次进入时给一个默认 config
+        # 所有题号
+        all_qids = sorted([q["qid"] for q in qs])
+        min_qid = min(all_qids)
+        max_qid = max(all_qids)
+
+        # 初始化默认 config
         if not st.session_state.config:
+            # 默认起始题号：如果有第 6 题，就从 6；否则从最小题号
+            default_start = 6 if any(q >= 6 for q in all_qids) else min_qid
             st.session_state.config = {
                 "N": 630,
                 "seed": 42,
+                "scale_start_qid": default_start,
                 "reverse_items": [],
                 "dimensions": {
-                    "A_dim": list(range(6, 15)),
-                    "B_dim": list(range(15, 25)),
-                    "C_dim": list(range(25, 35)),
-                    "SchoolClimate": list(range(35, 59)),
-                    "StudyHabits": list(range(59, 85)),
+                    "A_dim": [q for q in all_qids if default_start <= q < default_start + 10],
                 },
                 "demo": {
-                    "gender_p_female": 0.5,
+                    # 是否启用
+                    "use_Q1": False,
+                    "use_Q2": False,
+                    "use_Q3": False,
+                    "use_Q4": False,
+                    "use_Q5": False,
+                    # 百分比设置
+                    "Q1_perc": [50.0, 50.0],  # 男, 女
                     "grade_levels": 3,
-                    "grade_probs": [0.35, 0.40, 0.25],
-                    "origin_p_town": 0.55,
-                    "cadre_p_yes": 0.28,
-                    "only_child_p_yes": 0.38,
+                    "Q2_perc": [35.0, 40.0, 25.0],  # 年级
+                    "Q3_perc": [55.0, 45.0],  # 城镇, 农村
+                    "Q4_perc": [28.0, 72.0],  # 班干, 非班干
+                    "Q5_perc": [38.0, 62.0],  # 独生, 非独生
                 },
                 "item_params": {
-                    "mean": 3.6,
-                    "loading": 0.8,
+                    "mean": 3.60,
+                    "loading": 0.80,
                     "noise": 0.75,
+                },
+                "gender_effect": {"target_dim": "A_dim", "beta": 0.6},
+                "corr_constraint": {"d1": "A_dim", "d2": "A_dim", "rho": 0.0},
+                "mediation": {
+                    "A": "A_dim",
+                    "C": "A_dim",
+                    "B": "A_dim",
+                    "a": 0.6,
+                    "b": 0.6,
+                    "cprime": 0.2,
+                    "type": "部分中介",
                 },
             }
         cfg = st.session_state.config
 
+        # 样本量 & seed
         c1, c2 = st.columns([1, 1])
         with c1:
             cfg["N"] = st.number_input("样本量 N", 30, 5000, int(cfg.get("N", 630)), 10)
         with c2:
             cfg["seed"] = st.number_input("随机种子 seed", 0, 10000, int(cfg.get("seed", 42)), 1)
 
-        st.markdown("**维度归属（题号列表，可直接改）**")
-        dim_df = pd.DataFrame(
-            [{"dimension": k, "qids": ",".join(map(str, v))} for k, v in cfg.get("dimensions", {}).items()]
+        # 量表维度起始题号（你可以自选从第几题开始）
+        default_start_qid = int(cfg.get("scale_start_qid", 6))
+        if default_start_qid < min_qid:
+            default_start_qid = min_qid
+        if default_start_qid > max_qid:
+            default_start_qid = max_qid
+        scale_start_qid = st.number_input(
+            "量表维度起始题号（从这道题开始，后面的题才用于维度和 1~5 计分）",
+            min_value=min_qid,
+            max_value=max_qid,
+            value=default_start_qid,
+            step=1,
         )
-        edited = st.data_editor(dim_df, use_container_width=True, num_rows="dynamic")
-        dims = {}
-        for _, row in edited.iterrows():
-            name = str(row.get("dimension", "")).strip()
-            if not name:
-                continue
-            qtxt = str(row.get("qids", "")).strip()
-            qids = [int(x.strip()) for x in qtxt.split(",") if x.strip().isdigit()]
-            if qids:
-                dims[name] = qids
-        cfg["dimensions"] = dims
+        cfg["scale_start_qid"] = int(scale_start_qid)
 
+        # 可作为维度题的题号
+        scale_qids = [qid for qid in all_qids if qid >= cfg["scale_start_qid"]]
+
+        # ------- 维度设置：更人性化，多选题号 + 增删 -------
+        st.markdown("### 维度设置（大维度 = 若干题目的集合）")
+        st.caption("每个维度下，直接多选题号；想删就点“删除本维度”，想加就点“新增维度”。")
+
+        dims_dict = cfg.get("dimensions", {})
+        # 确保是有序遍历
+        dims_items = list(dims_dict.items())
+
+        # 新增维度按钮（先处理，点击后立即刷新）
+        if st.button("➕ 新增维度"):
+            base_name = "新维度"
+            idx = 1
+            new_name = base_name
+            existing_names = set(dims_dict.keys())
+            while new_name in existing_names:
+                new_name = f"{base_name}{idx}"
+                idx += 1
+            dims_dict[new_name] = []
+            cfg["dimensions"] = dims_dict
+            st.session_state.config = cfg
+            st.experimental_rerun()
+
+        delete_keys = []
+        # 用索引 i 来绑定组件 key
+        for i, (orig_name, qid_list) in enumerate(dims_items):
+            with st.expander(f"维度 {i+1}：{orig_name}", expanded=True):
+                new_name = st.text_input("维度名称", value=orig_name, key=f"dim_name_{i}")
+                # 确保默认值在可选题号里
+                valid_default = [qid for qid in qid_list if qid in scale_qids]
+                selected_qids = st.multiselect(
+                    "包含题目（可多选）",
+                    options=scale_qids,
+                    default=valid_default,
+                    key=f"dim_items_{i}",
+                )
+                if st.button("删除本维度", key=f"dim_del_{i}"):
+                    delete_keys.append(orig_name)
+
+        # 如果有删除请求，处理后重跑
+        if delete_keys:
+            for k in delete_keys:
+                if k in dims_dict:
+                    dims_dict.pop(k)
+            cfg["dimensions"] = dims_dict
+            st.session_state.config = cfg
+            st.experimental_rerun()
+        else:
+            # 否则，根据当前组件的取值，更新 cfg["dimensions"]
+            new_dims = {}
+            for i, (orig_name, qid_list) in enumerate(dims_items):
+                name = st.session_state.get(f"dim_name_{i}", "").strip()
+                items = st.session_state.get(f"dim_items_{i}", [])
+                if name and items:
+                    new_dims[name] = sorted(items)
+            cfg["dimensions"] = new_dims
+
+        if not cfg["dimensions"]:
+            st.warning("当前还没有任何维度，请点击“➕ 新增维度”创建。")
+        else:
+            st.success(f"当前共有 {len(cfg['dimensions'])} 个维度。")
+
+        # ------- 反向题 -------
         rev_txt = st.text_input(
-            "反向题题号（逗号分隔）", value=",".join(map(str, cfg.get("reverse_items", [])))
+            "反向题题号（逗号分隔）",
+            value=",".join(map(str, cfg.get("reverse_items", []))),
+            help="例如：8,12,15 表示这些题目在 1~5 上按 1↔5 反向计分。",
         )
         cfg["reverse_items"] = [int(x.strip()) for x in rev_txt.split(",") if x.strip().isdigit()]
 
-        # ------- 新增：人口学变量分布设置 -------
-        st.markdown("**（可选）人口学变量分布设置：控制 Q1–Q5 各类别数量**")
+        # ------- 人口学变量：全部可选 + 百分比可精细设置 -------
+        st.markdown("### 人口学变量分布（全部可选）")
+        st.caption("勾选表示生成该人口学变量，不勾选则完全不生成。百分比是“目标比例”，系统会自动归一化。")
+
         demo = cfg.get("demo", {})
-        with st.expander("展开人口学分布设置（可选，不改则用默认比例）", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                gender_p_female = st.slider(
-                    "Q1 性别：女生比例（1=男 2=女）",
-                    0.0,
-                    1.0,
-                    float(demo.get("gender_p_female", 0.5)),
-                    0.05,
-                )
-            with col2:
-                origin_p_town = st.slider(
-                    "Q3 生源地：城镇比例（1=城镇 2=农村）",
-                    0.0,
-                    1.0,
-                    float(demo.get("origin_p_town", 0.55)),
-                    0.05,
-                )
+        # 默认 demo 结构补齐
+        demo.setdefault("use_Q1", False)
+        demo.setdefault("use_Q2", False)
+        demo.setdefault("use_Q3", False)
+        demo.setdefault("use_Q4", False)
+        demo.setdefault("use_Q5", False)
+        demo.setdefault("Q1_perc", [50.0, 50.0])
+        demo.setdefault("grade_levels", 3)
+        demo.setdefault("Q2_perc", [35.0, 40.0, 25.0])
+        demo.setdefault("Q3_perc", [55.0, 45.0])
+        demo.setdefault("Q4_perc", [28.0, 72.0])
+        demo.setdefault("Q5_perc", [38.0, 62.0])
 
-            col3, col4, col5 = st.columns(3)
-            with col3:
-                cadre_p_yes = st.slider(
-                    "Q4 是否担任班干部：\"是\" 的比例（1=是 2=否）",
-                    0.0,
-                    1.0,
-                    float(demo.get("cadre_p_yes", 0.28)),
-                    0.05,
-                )
-            with col4:
-                only_child_p_yes = st.slider(
-                    "Q5 是否独生子女：\"独生子女\" 比例（1=独生子女 2=非独生）",
-                    0.0,
-                    1.0,
-                    float(demo.get("only_child_p_yes", 0.38)),
-                    0.05,
-                )
-            with col5:
-                grade_levels = st.selectbox(
-                    "Q2 年级类别数",
-                    [3, 4],
-                    index=0 if int(demo.get("grade_levels", 3)) == 3 else 1,
-                )
+        with st.expander("展开人口学设置", expanded=False):
+            # Q1 性别
+            use_q1 = st.checkbox("启用 Q1：您的性别（1=男 2=女）", value=demo.get("use_Q1", False))
+            demo["use_Q1"] = use_q1
+            if use_q1:
+                q1p = demo.get("Q1_perc", [50.0, 50.0])
+                while len(q1p) < 2:
+                    q1p.append(0.0)
+                c1, c2 = st.columns(2)
+                with c1:
+                    q1_male = st.number_input(
+                        "男 (%)",
+                        0.0,
+                        100.0,
+                        float(q1p[0]),
+                        1.0,
+                        help="例如 40 表示约 40%。",
+                        key="q1_male",
+                    )
+                with c2:
+                    q1_female = st.number_input(
+                        "女 (%)",
+                        0.0,
+                        100.0,
+                        float(q1p[1]),
+                        1.0,
+                        key="q1_female",
+                    )
+                demo["Q1_perc"] = [q1_male, q1_female]
 
-            st.markdown("Q2 年级各类别比例（会自动标准化，总和不必刚好等于 1）")
-            if grade_levels == 3:
-                default_probs = demo.get("grade_probs", [0.35, 0.40, 0.25])
-                while len(default_probs) < 3:
-                    default_probs.append(0.0)
-                c21, c22, c23 = st.columns(3)
-                with c21:
-                    p1 = st.number_input("大一", 0.0, 1.0, float(default_probs[0]), 0.01)
-                with c22:
-                    p2 = st.number_input("大二", 0.0, 1.0, float(default_probs[1]), 0.01)
-                with c23:
-                    p3 = st.number_input("大三", 0.0, 1.0, float(default_probs[2]), 0.01)
-                grade_probs = [p1, p2, p3]
-            else:
-                default_probs = demo.get("grade_probs", [0.25, 0.25, 0.25, 0.25])
-                while len(default_probs) < 4:
-                    default_probs.append(0.0)
-                c21, c22, c23, c24 = st.columns(4)
-                with c21:
-                    p1 = st.number_input("大一", 0.0, 1.0, float(default_probs[0]), 0.01)
-                with c22:
-                    p2 = st.number_input("大二", 0.0, 1.0, float(default_probs[1]), 0.01)
-                with c23:
-                    p3 = st.number_input("大三", 0.0, 1.0, float(default_probs[2]), 0.01)
-                with c24:
-                    p4 = st.number_input("大四", 0.0, 1.0, float(default_probs[3]), 0.01)
-                grade_probs = [p1, p2, p3, p4]
+            st.markdown("---")
 
-            demo = {
-                "gender_p_female": float(gender_p_female),
-                "origin_p_town": float(origin_p_town),
-                "cadre_p_yes": float(cadre_p_yes),
-                "only_child_p_yes": float(only_child_p_yes),
-                "grade_levels": int(grade_levels),
-                "grade_probs": [float(x) for x in grade_probs],
-            }
+            # Q2 年级
+            use_q2 = st.checkbox("启用 Q2：您的年级", value=demo.get("use_Q2", False))
+            demo["use_Q2"] = use_q2
+            grade_levels = int(demo.get("grade_levels", 3))
+            if grade_levels not in (3, 4):
+                grade_levels = 3
+            grade_levels = st.selectbox("年级类别数", [3, 4], index=0 if grade_levels == 3 else 1)
+            demo["grade_levels"] = int(grade_levels)
+
+            if use_q2:
+                q2p = demo.get("Q2_perc", [35.0, 40.0, 25.0, 0.0])
+                while len(q2p) < grade_levels:
+                    q2p.append(0.0)
+                cols = st.columns(grade_levels)
+                labels = ["大一 (%)", "大二 (%)", "大三 (%)", "大四 (%)"]
+                new_q2p = []
+                for idx in range(grade_levels):
+                    with cols[idx]:
+                        val = st.number_input(
+                            labels[idx],
+                            0.0,
+                            100.0,
+                            float(q2p[idx]),
+                            1.0,
+                            key=f"q2_{idx+1}",
+                        )
+                        new_q2p.append(val)
+                demo["Q2_perc"] = new_q2p
+
+            st.markdown("---")
+
+            # Q3 生源地
+            use_q3 = st.checkbox("启用 Q3：您的生源地（1=城镇 2=农村）", value=demo.get("use_Q3", False))
+            demo["use_Q3"] = use_q3
+            if use_q3:
+                q3p = demo.get("Q3_perc", [55.0, 45.0])
+                while len(q3p) < 2:
+                    q3p.append(0.0)
+                c1, c2 = st.columns(2)
+                with c1:
+                    q3_town = st.number_input(
+                        "城镇 (%)",
+                        0.0,
+                        100.0,
+                        float(q3p[0]),
+                        1.0,
+                        key="q3_town",
+                    )
+                with c2:
+                    q3_rural = st.number_input(
+                        "农村 (%)", 0.0, 100.0, float(q3p[1]), 1.0, key="q3_rural"
+                    )
+                demo["Q3_perc"] = [q3_town, q3_rural]
+
+            st.markdown("---")
+
+            # Q4 班干部
+            use_q4 = st.checkbox("启用 Q4：您是否担任班干部（1=是 2=否）", value=demo.get("use_Q4", False))
+            demo["use_Q4"] = use_q4
+            if use_q4:
+                q4p = demo.get("Q4_perc", [28.0, 72.0])
+                while len(q4p) < 2:
+                    q4p.append(0.0)
+                c1, c2 = st.columns(2)
+                with c1:
+                    q4_yes = st.number_input(
+                        "是 (%)",
+                        0.0,
+                        100.0,
+                        float(q4p[0]),
+                        1.0,
+                        key="q4_yes",
+                    )
+                with c2:
+                    q4_no = st.number_input(
+                        "否 (%)",
+                        0.0,
+                        100.0,
+                        float(q4p[1]),
+                        1.0,
+                        key="q4_no",
+                    )
+                demo["Q4_perc"] = [q4_yes, q4_no]
+
+            st.markdown("---")
+
+            # Q5 独生子女
+            use_q5 = st.checkbox("启用 Q5：您是否独生子女（1=独生 2=非独生）", value=demo.get("use_Q5", False))
+            demo["use_Q5"] = use_q5
+            if use_q5:
+                q5p = demo.get("Q5_perc", [38.0, 62.0])
+                while len(q5p) < 2:
+                    q5p.append(0.0)
+                c1, c2 = st.columns(2)
+                with c1:
+                    q5_yes = st.number_input(
+                        "独生子女 (%)",
+                        0.0,
+                        100.0,
+                        float(q5p[0]),
+                        1.0,
+                        key="q5_yes",
+                    )
+                with c2:
+                    q5_no = st.number_input(
+                        "非独生子女 (%)",
+                        0.0,
+                        100.0,
+                        float(q5p[1]),
+                        1.0,
+                        key="q5_no",
+                    )
+                demo["Q5_perc"] = [q5_yes, q5_no]
+
         cfg["demo"] = demo
 
-        # ------- 新增：题目生成参数 -------
-        st.markdown("**（可选）题目生成参数：控制平均分和离散度**")
+        # ------- 题目生成参数：平均值更精细 -------
+        st.markdown("### 题目生成参数（控制平均值和离散度）")
         item_params = cfg.get("item_params", {})
-        with st.expander("展开题目生成高级设置（可选）", expanded=False):
-            colm1, colm2, colm3 = st.columns(3)
-            with colm1:
-                item_mean = st.number_input(
-                    "题目平均值（1-5）",
-                    1.0,
-                    5.0,
-                    float(item_params.get("mean", 3.6)),
-                    0.1,
-                )
-            with colm2:
-                item_loading = st.number_input(
-                    "潜变量载荷（0-1.5）",
-                    0.0,
-                    1.5,
-                    float(item_params.get("loading", 0.8)),
-                    0.05,
-                )
-            with colm3:
-                item_noise = st.number_input(
-                    "题目噪声 SD",
-                    0.0,
-                    3.0,
-                    float(item_params.get("noise", 0.75)),
-                    0.05,
-                )
-            item_params = {
-                "mean": float(item_mean),
-                "loading": float(item_loading),
-                "noise": float(item_noise),
-            }
-        cfg["item_params"] = item_params
+        colm1, colm2, colm3 = st.columns(3)
+        with colm1:
+            item_mean = st.number_input(
+                "题目平均值（1~5）",
+                1.0,
+                5.0,
+                float(item_params.get("mean", 3.60)),
+                0.01,
+                help="例如 3.20 或 3.75，可以非常精细地控制整体水平。",
+            )
+        with colm2:
+            item_loading = st.number_input(
+                "潜变量载荷（0~1.5）",
+                0.0,
+                1.5,
+                float(item_params.get("loading", 0.80)),
+                0.05,
+                help="越大，维度越“清晰”，维度差异越明显。",
+            )
+        with colm3:
+            item_noise = st.number_input(
+                "题目噪声 SD",
+                0.0,
+                3.0,
+                float(item_params.get("noise", 0.75)),
+                0.05,
+                help="越大，数据越分散，越接近真实问卷的“杂乱度”。",
+            )
+        cfg["item_params"] = {
+            "mean": float(item_mean),
+            "loading": float(item_loading),
+            "noise": float(item_noise),
+        }
 
-        # config JSON 显示与导入/导出
+        # ------- config JSON 展示 & 导入/导出 -------
         cfg_json = st.text_area(
-            "config.json（可复制保存）",
+            "config.json（可复制保存，下次直接粘贴导入）",
             value=json.dumps(cfg, ensure_ascii=False, indent=2),
             height=220,
         )
-        if st.button("应用上方 JSON", type="primary"):
-            st.session_state.config = json.loads(cfg_json)
-            st.success("已应用。")
-        st.download_button(
-            "下载 config.json",
-            data=cfg_json.encode("utf-8"),
-            file_name="config.json",
-            mime="application/json",
-        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("应用上方 JSON", type="primary"):
+                try:
+                    st.session_state.config = json.loads(cfg_json)
+                    st.success("已应用上方 JSON。")
+                except Exception as e:
+                    st.error(f"JSON 解析失败：{e}")
+        with col_b:
+            st.download_button(
+                "下载 config.json",
+                data=cfg_json.encode("utf-8"),
+                file_name="config.json",
+                mime="application/json",
+            )
+
         st.session_state.config = cfg
 
-# ---------------- Tab 3: 关系约束 ----------------
+# ---------- Tab 3: 关系约束 ----------
 with tabs[2]:
     st.subheader("关系约束：性别差异、维度相关、中介模型")
     cfg = st.session_state.config
@@ -424,30 +612,60 @@ with tabs[2]:
         st.info("先完成第 1–2 页。")
     else:
         dims = list(cfg.get("dimensions", {}).keys())
-        if len(dims) < 3:
-            st.warning("维度数量不足（至少 3 个）。")
+        if len(dims) < 1:
+            st.warning("维度数量不足，请先在第 2 页配置。")
         else:
-            st.markdown("### 性别差异（男=1 女=2，建模时 0=男 1=女）")
-            target = st.selectbox("目标维度", dims, index=0)
-            beta = st.slider("β（越大越容易显著）", 0.0, 1.5, 0.6, 0.05)
+            # 性别差异
+            st.markdown("### 性别差异（基于内部性别变量 0=男 1=女）")
+            target_default = cfg.get("gender_effect", {}).get("target_dim", dims[0])
+            if target_default not in dims:
+                target_default = dims[0]
+            target = st.selectbox("目标维度", dims, index=dims.index(target_default))
+            beta_default = float(cfg.get("gender_effect", {}).get("beta", 0.6))
+            beta = st.slider("β（女生相对男生的平均差异）", -1.5, 1.5, beta_default, 0.05)
             cfg["gender_effect"] = {"target_dim": target, "beta": float(beta)}
 
-            st.markdown("### 维度相关")
-            d1 = st.selectbox("维度A", dims, index=0, key="d1")
-            d2 = st.selectbox("维度B", dims, index=1, key="d2")
-            rho = st.slider("ρ（期望的相关系数）", -0.9, 0.9, 0.4, 0.05)
+            # 维度相关
+            st.markdown("### 维度相关（设置一对维度的相关系数）")
+            cc = cfg.get("corr_constraint", {})
+            d1_default = cc.get("d1", dims[0])
+            if d1_default not in dims:
+                d1_default = dims[0]
+            d2_default = cc.get("d2", dims[min(1, len(dims)-1)])
+            if d2_default not in dims:
+                d2_default = dims[min(1, len(dims)-1)]
+            rho_default = float(cc.get("rho", 0.0))
+
+            d1 = st.selectbox("维度 A", dims, index=dims.index(d1_default), key="corr_d1")
+            d2 = st.selectbox("维度 B", dims, index=dims.index(d2_default), key="corr_d2")
+            rho = st.slider("期望相关系数 ρ", -0.9, 0.9, rho_default, 0.05)
             cfg["corr_constraint"] = {"d1": d1, "d2": d2, "rho": float(rho)}
 
+            # 中介模型
             st.markdown("### 中介：A→C→B")
-            A = st.selectbox("A（自变量）", dims, index=0, key="A")
-            C = st.selectbox("C（中介变量）", dims, index=1, key="C")
-            B = st.selectbox("B（因变量）", dims, index=2, key="B")
-            med_type = st.radio("中介类型", ["完全中介", "部分中介"], horizontal=True)
-            a = st.slider("a（A→C）", 0.0, 1.2, 0.6, 0.05)
-            b = st.slider("b（C→B）", 0.0, 1.2, 0.6, 0.05)
-            cprime_default = 0.2 if med_type == "部分中介" else 0.0
+            med = cfg.get("mediation", {})
+            A_default = med.get("A", dims[0])
+            C_default = med.get("C", dims[min(1, len(dims)-1)])
+            B_default = med.get("B", dims[min(2, len(dims)-1)])
+
+            if A_default not in dims:
+                A_default = dims[0]
+            if C_default not in dims:
+                C_default = dims[min(1, len(dims)-1)]
+            if B_default not in dims:
+                B_default = dims[min(2, len(dims)-1)]
+
+            A = st.selectbox("A（自变量）", dims, index=dims.index(A_default), key="med_A")
+            C = st.selectbox("C（中介变量）", dims, index=dims.index(C_default), key="med_C")
+            B = st.selectbox("B（因变量）", dims, index=dims.index(B_default), key="med_B")
+            med_type = st.radio("中介类型", ["完全中介", "部分中介"], index=1 if med.get("type", "部分中介") == "部分中介" else 0, horizontal=True)
+            a_default = float(med.get("a", 0.6))
+            b_default = float(med.get("b", 0.6))
+            cprime_default = float(med.get("cprime", 0.2 if med_type == "部分中介" else 0.0))
+            a = st.slider("路径 a（A→C）", 0.0, 1.2, a_default, 0.05)
+            b = st.slider("路径 b（C→B）", 0.0, 1.2, b_default, 0.05)
             cprime = 0.0 if med_type == "完全中介" else st.slider(
-                "c'（A→B）", 0.0, 1.2, cprime_default, 0.05
+                "直接效应 c'（A→B）", 0.0, 1.2, cprime_default, 0.05
             )
             cfg["mediation"] = {
                 "A": A,
@@ -458,223 +676,275 @@ with tabs[2]:
                 "cprime": float(cprime),
                 "type": med_type,
             }
+
             st.session_state.config = cfg
             st.success("已保存关系约束。")
 
-# ---------------- Tab 4: 生成并导出 ----------------
+# ---------- Tab 4: 生成与导出 ----------
 with tabs[3]:
     st.subheader("生成并导出（CSV / .sps / .sav）")
     cfg = st.session_state.config
     qs = st.session_state.questions
     if not cfg or not qs:
-        st.info("先完成第 1–3 页。")
+        st.info("先完成前面三步。")
     else:
         dims_map = cfg.get("dimensions", {})
         dim_names = list(dims_map.keys())
-        N = int(cfg.get("N", 630))
-        seed = int(cfg.get("seed", 42))
-        max_q = max([q["qid"] for q in qs])
+        if not dim_names:
+            st.warning("还没有设置任何维度，请先到第 2 页配置。")
+        else:
+            N = int(cfg.get("N", 630))
+            seed = int(cfg.get("seed", 42))
 
-        k = len(dim_names)
-        R = np.eye(k)
-        cc = cfg.get("corr_constraint")
-        if cc and cc.get("d1") in dim_names and cc.get("d2") in dim_names:
-            i = dim_names.index(cc["d1"])
-            j = dim_names.index(cc["d2"])
-            R[i, j] = R[j, i] = float(cc.get("rho", 0.0))
+            all_qids = sorted([q["qid"] for q in qs])
+            min_qid = min(all_qids)
+            max_qid = max(all_qids)
+            scale_start_qid = int(cfg.get("scale_start_qid", 6))
+            if scale_start_qid < min_qid:
+                scale_start_qid = min_qid
+            if scale_start_qid > max_qid:
+                scale_start_qid = max_qid
 
-        if st.button("生成数据", type="primary"):
-            rng = np.random.default_rng(seed)
+            # 相关矩阵
+            k = len(dim_names)
+            R = np.eye(k)
+            cc = cfg.get("corr_constraint")
+            if cc and cc.get("d1") in dim_names and cc.get("d2") in dim_names:
+                i = dim_names.index(cc["d1"])
+                j = dim_names.index(cc["d2"])
+                R[i, j] = R[j, i] = float(cc.get("rho", 0.0))
 
-            # 1) 生成潜变量 & 相关结构
-            Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
+            if st.button("生成数据", type="primary"):
+                rng = np.random.default_rng(seed)
 
-            # 2) 性别（0=男 1=女），可控制比例 + 性别效应
-            demo = cfg.get("demo", {})
-            p_female = float(demo.get("gender_p_female", 0.5))
-            p_female = min(max(p_female, 0.0), 1.0)
-            gender01 = rng.binomial(1, p_female, size=N)
+                # 1) 大维度潜变量
+                Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
 
-            ge = cfg.get("gender_effect")
-            if ge and ge.get("target_dim") in Z.columns:
-                Z = apply_group_effect(Z, gender01, ge["target_dim"], float(ge.get("beta", 0.0)))
+                # 2) 性别潜变量（内部用）+ 性别效应
+                demo = cfg.get("demo", {})
+                q1_perc = demo.get("Q1_perc", [50.0, 50.0])
+                if not q1_perc or sum(q1_perc) <= 0:
+                    q1_perc = [50.0, 50.0]
+                probs_gender = np.array(q1_perc[:2], dtype=float)
+                probs_gender = probs_gender / probs_gender.sum()
+                # gender01: 0=男, 1=女（第二个）
+                gender_vals = rng.choice([0, 1], size=N, p=probs_gender)
+                gender01 = gender_vals.copy()
 
-            # 3) 中介结构
-            med = cfg.get("mediation")
-            if med:
-                A, C, B = med["A"], med["C"], med["B"]
-                if A in Z.columns and C in Z.columns and B in Z.columns:
-                    Z = apply_mediation(
-                        Z,
-                        A,
-                        C,
-                        B,
-                        a=float(med.get("a", 0.6)),
-                        b=float(med.get("b", 0.6)),
-                        cprime=float(med.get("cprime", 0.1)),
-                        seed=seed + 7,
+                ge = cfg.get("gender_effect")
+                if ge and ge.get("target_dim") in Z.columns:
+                    Z = apply_group_effect(Z, gender01, ge["target_dim"], float(ge.get("beta", 0.0)))
+
+                # 3) 中介结构
+                med = cfg.get("mediation")
+                if med:
+                    A, C, B = med["A"], med["C"], med["B"]
+                    if A in Z.columns and C in Z.columns and B in Z.columns:
+                        Z = apply_mediation(
+                            Z,
+                            A,
+                            C,
+                            B,
+                            a=float(med.get("a", 0.6)),
+                            b=float(med.get("b", 0.6)),
+                            cprime=float(med.get("cprime", 0.1)),
+                            seed=seed + 7,
+                        )
+
+                # 4) 构造输出数据框
+                out = pd.DataFrame({"ID": np.arange(1, N + 1)})
+
+                # 人口学变量按启用情况生成
+                # Q1 性别：1=男 2=女
+                if demo.get("use_Q1", False):
+                    out["Q1"] = np.where(gender_vals == 0, 1, 2)
+
+                # Q2 年级
+                if demo.get("use_Q2", False):
+                    grade_levels = int(demo.get("grade_levels", 3))
+                    if grade_levels not in (3, 4):
+                        grade_levels = 3
+                    q2_perc = demo.get("Q2_perc", [35.0, 40.0, 25.0, 0.0])
+                    if not q2_perc or sum(q2_perc) <= 0:
+                        q2_perc = [100.0 / grade_levels] * grade_levels
+                    probs_q2 = np.array(q2_perc[:grade_levels], dtype=float)
+                    probs_q2 = probs_q2 / probs_q2.sum()
+                    out["Q2"] = rng.choice(list(range(1, grade_levels + 1)), size=N, p=probs_q2)
+
+                # Q3 生源地：1=城镇 2=农村
+                if demo.get("use_Q3", False):
+                    q3p = demo.get("Q3_perc", [55.0, 45.0])
+                    if not q3p or sum(q3p) <= 0:
+                        q3p = [50.0, 50.0]
+                    probs_q3 = np.array(q3p[:2], dtype=float)
+                    probs_q3 = probs_q3 / probs_q3.sum()
+                    out["Q3"] = rng.choice([1, 2], size=N, p=probs_q3)
+
+                # Q4 班干部：1=是 2=否
+                if demo.get("use_Q4", False):
+                    q4p = demo.get("Q4_perc", [28.0, 72.0])
+                    if not q4p or sum(q4p) <= 0:
+                        q4p = [50.0, 50.0]
+                    probs_q4 = np.array(q4p[:2], dtype=float)
+                    probs_q4 = probs_q4 / probs_q4.sum()
+                    out["Q4"] = rng.choice([1, 2], size=N, p=probs_q4)
+
+                # Q5 独生子女：1=独生 2=非独生
+                if demo.get("use_Q5", False):
+                    q5p = demo.get("Q5_perc", [38.0, 62.0])
+                    if not q5p or sum(q5p) <= 0:
+                        q5p = [50.0, 50.0]
+                    probs_q5 = np.array(q5p[:2], dtype=float)
+                    probs_q5 = probs_q5 / probs_q5.sum()
+                    out["Q5"] = rng.choice([1, 2], size=N, p=probs_q5)
+
+                # 5) 潜变量 → 题目分数（只对 qid >= scale_start_qid 的题目生成 1~5）
+                qid_to_dim = {}
+                for d, qids in dims_map.items():
+                    for qid in qids:
+                        qid_to_dim[qid] = d
+                rev = set(cfg.get("reverse_items", []))
+
+                item_params = cfg.get("item_params", {})
+                item_mean = float(item_params.get("mean", 3.6))
+                item_loading = float(item_params.get("loading", 0.8))
+                item_noise = float(item_params.get("noise", 0.75))
+
+                for d in dim_names:
+                    # 找到属于该维度且 >= scale_start_qid 的题号
+                    qids = [qid for qid, dd in qid_to_dim.items() if dd == d and qid >= scale_start_qid]
+                    if not qids:
+                        continue
+                    qids = sorted(qids)
+                    disc = latent_to_items(
+                        Z[d].to_numpy(),
+                        len(qids),
+                        mean=item_mean,
+                        loading=item_loading,
+                        noise=item_noise,
+                        seed=seed + 13 + hash(d) % 1000,
                     )
+                    for idx, qid in enumerate(qids):
+                        x = disc[:, idx]
+                        if qid in rev:
+                            x = 6 - x
+                        out[f"Q{qid}"] = x
 
-            # 4) 人口学变量 Q1-Q5
-            out = pd.DataFrame({"ID": np.arange(1, N + 1)})
+                # 6) 各维度均分
+                cols = ["ID"]
+                # 按题号顺序添加 Q 列
+                for qid in all_qids:
+                    col = f"Q{qid}"
+                    if col in out.columns:
+                        cols.append(col)
+                for d in dim_names:
+                    qcols = [f"Q{qid}" for qid in dims_map[d] if f"Q{qid}" in out.columns]
+                    if qcols:
+                        out[f"{d}_mean"] = out[qcols].mean(axis=1)
+                        cols.append(f"{d}_mean")
+                out = out[cols]
 
-            # Q1 性别 1=男 2=女
-            out["Q1"] = np.where(gender01 == 0, 1, 2)
+                st.session_state.generated = out
+                st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
 
-            # Q2 年级（3 或 4 个等级，可控比例）
-            grade_levels = int(demo.get("grade_levels", 3))
-            if grade_levels not in (3, 4):
-                grade_levels = 3
-            grade_probs = demo.get("grade_probs")
-            if not grade_probs or len(grade_probs) < grade_levels:
-                grade_probs = [0.35, 0.40, 0.25] if grade_levels == 3 else [0.25, 0.25, 0.25, 0.25]
-            grade_probs_arr = np.array(grade_probs[:grade_levels], dtype=float)
-            if grade_probs_arr.sum() <= 0:
-                grade_probs_arr = np.ones(grade_levels, dtype=float) / grade_levels
-            else:
-                grade_probs_arr = grade_probs_arr / grade_probs_arr.sum()
-            grade_choices = np.arange(1, grade_levels + 1)
-            out["Q2"] = rng.choice(grade_choices, size=N, p=grade_probs_arr)
+            # 预览与导出
+            if "generated" in st.session_state:
+                out = st.session_state.generated
+                st.dataframe(out.head(50), use_container_width=True)
 
-            # Q3 生源地 1=城镇 2=农村
-            origin_p_town = float(demo.get("origin_p_town", 0.55))
-            origin_p_town = min(max(origin_p_town, 0.0), 1.0)
-            out["Q3"] = np.where(rng.random(size=N) < origin_p_town, 1, 2)
+                # 变量标签
+                var_labels = {"ID": "Respondent ID"}
+                for q in qs:
+                    col = f"Q{q['qid']}"
+                    if col in out.columns:
+                        var_labels[col] = q["stem"][:240]
+                # 维度均分标签
+                for d in dim_names:
+                    if f"{d}_mean" in out.columns:
+                        var_labels[f"{d}_mean"] = f"{d}（均分）"
 
-            # Q4 班干部 1=是 2=否
-            cadre_p_yes = float(demo.get("cadre_p_yes", 0.28))
-            cadre_p_yes = min(max(cadre_p_yes, 0.0), 1.0)
-            out["Q4"] = np.where(rng.random(size=N) < cadre_p_yes, 1, 2)
+                # 值标签
+                value_labels = {}
+                demo = cfg.get("demo", {})
 
-            # Q5 独生子女 1=独生子女 2=非独生
-            only_child_p_yes = float(demo.get("only_child_p_yes", 0.38))
-            only_child_p_yes = min(max(only_child_p_yes, 0.0), 1.0)
-            out["Q5"] = np.where(rng.random(size=N) < only_child_p_yes, 1, 2)
+                # Q1
+                if "Q1" in out.columns:
+                    value_labels["Q1"] = {1: "男", 2: "女"}
+                # Q2
+                if "Q2" in out.columns:
+                    grade_levels = int(demo.get("grade_levels", 3))
+                    if grade_levels not in (3, 4):
+                        grade_levels = 3
+                    if grade_levels == 3:
+                        q2_labels = {1: "大一", 2: "大二", 3: "大三"}
+                    else:
+                        q2_labels = {1: "大一", 2: "大二", 3: "大三", 4: "大四"}
+                    value_labels["Q2"] = q2_labels
+                # Q3
+                if "Q3" in out.columns:
+                    value_labels["Q3"] = {1: "城镇", 2: "农村"}
+                # Q4
+                if "Q4" in out.columns:
+                    value_labels["Q4"] = {1: "是", 2: "否"}
+                # Q5
+                if "Q5" in out.columns:
+                    value_labels["Q5"] = {1: "独生子女", 2: "非独生子女"}
 
-            # 5) 将潜变量转换为题目得分
-            qid_to_dim = {}
-            for d, qids in dims_map.items():
-                for qid in qids:
-                    qid_to_dim[qid] = d
-            rev = set(cfg.get("reverse_items", []))
+                # 量表题：从 scale_start_qid 开始，赋 1~5 选项
+                for qid in all_qids:
+                    col = f"Q{qid}"
+                    if col in out.columns and qid >= scale_start_qid:
+                        value_labels[col] = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
 
-            item_params = cfg.get("item_params", {})
-            item_mean = float(item_params.get("mean", 3.6))
-            item_loading = float(item_params.get("loading", 0.8))
-            item_noise = float(item_params.get("noise", 0.75))
-
-            for d in dim_names:
-                qids = [qid for qid, dd in qid_to_dim.items() if dd == d and qid >= 6]
-                if not qids:
-                    continue
-                qids = sorted(qids)
-                disc = latent_to_items(
-                    Z[d].to_numpy(),
-                    len(qids),
-                    mean=item_mean,
-                    loading=item_loading,
-                    noise=item_noise,
-                    seed=seed + 13 + hash(d) % 1000,
+                # CSV
+                csv_bytes = out.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+                st.download_button(
+                    "下载 CSV",
+                    data=csv_bytes,
+                    file_name="synthetic_data.csv",
+                    mime="text/csv",
                 )
-                for idx, qid in enumerate(qids):
-                    x = disc[:, idx]
-                    if qid in rev:
-                        x = 6 - x
-                    out[f"Q{qid}"] = x
 
-            # 6) 追加各维度均分
-            cols = ["ID"] + [f"Q{i}" for i in range(1, max_q + 1) if f"Q{i}" in out.columns]
-            for d in dim_names:
-                qcols = [f"Q{qid}" for qid in dims_map[d] if f"Q{qid}" in out.columns]
-                if qcols:
-                    out[f"{d}_mean"] = out[qcols].mean(axis=1)
-                    cols.append(f"{d}_mean")
-            out = out[cols]
-            st.session_state.generated = out
-            st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
+                # SPSS 语法
+                sps = make_spss_syntax_for_csv(
+                    "synthetic_data.csv",
+                    out.columns.tolist(),
+                    var_labels,
+                    value_labels,
+                )
+                st.download_button(
+                    "下载 .sps（导入 + 标签）",
+                    data=sps.encode("utf-8"),
+                    file_name="import_and_label.sps",
+                    mime="text/plain",
+                )
 
-        # 显示与导出
-        if "generated" in st.session_state:
-            out = st.session_state.generated
-            st.dataframe(out.head(50), use_container_width=True)
+                # 可选：.sav
+                if HAS_PYREADSTAT:
+                    import tempfile
+                    import os
 
-            # 变量标签
-            var_labels = {
-                "ID": "Respondent ID",
-                "Q1": "您的性别",
-                "Q2": "您的年级",
-                "Q3": "您的生源地",
-                "Q4": "您是否担任班干部",
-                "Q5": "您是否独生子女",
-            }
-            for q in qs:
-                var_labels[f"Q{q['qid']}"] = q["stem"][:240]
-            for d in dim_names:
-                if f"{d}_mean" in out.columns:
-                    var_labels[f"{d}_mean"] = f"{d}（均分）"
-
-            # 值标签
-            demo = cfg.get("demo", {})
-            grade_levels = int(demo.get("grade_levels", 3))
-            if grade_levels not in (3, 4):
-                grade_levels = 3
-
-            if grade_levels == 3:
-                q2_labels = {1: "大一", 2: "大二", 3: "大三"}
-            else:
-                q2_labels = {1: "大一", 2: "大二", 3: "大三", 4: "大四"}
-
-            value_labels = {
-                "Q1": {1: "男", 2: "女"},
-                "Q2": q2_labels,
-                "Q3": {1: "城镇", 2: "农村"},
-                "Q4": {1: "是", 2: "否"},
-                "Q5": {1: "独生子女", 2: "非独生子女"},
-            }
-            for q in range(6, max_q + 1):
-                if f"Q{q}" in out.columns:
-                    value_labels[f"Q{q}"] = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
-
-            csv_bytes = out.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-            st.download_button(
-                "下载 CSV", data=csv_bytes, file_name="synthetic_data.csv", mime="text/csv"
-            )
-
-            sps = make_spss_syntax_for_csv(
-                "synthetic_data.csv", out.columns.tolist(), var_labels, value_labels
-            )
-            st.download_button(
-                "下载 .sps（导入+标签）",
-                data=sps.encode("utf-8"),
-                file_name="import_and_label.sps",
-                mime="text/plain",
-            )
-
-            if HAS_PYREADSTAT:
-                import tempfile
-                import os
-
-                with tempfile.NamedTemporaryFile(suffix=".sav", delete=False) as tf:
-                    path = tf.name
-                try:
-                    pyreadstat.write_sav(
-                        out,
-                        path,
-                        column_labels=var_labels,
-                        variable_value_labels=value_labels,
-                    )
-                    with open(path, "rb") as f:
-                        sav = f.read()
-                    st.download_button(
-                        "下载 .sav（含标签）",
-                        data=sav,
-                        file_name="synthetic_data.sav",
-                        mime="application/octet-stream",
-                    )
-                finally:
+                    with tempfile.NamedTemporaryFile(suffix=".sav", delete=False) as tf:
+                        path = tf.name
                     try:
-                        os.remove(path)
-                    except Exception:
-                        pass
-            else:
-                st.info("未检测到 pyreadstat：可用 CSV + .sps 导入 SPSS（等价）。")
+                        pyreadstat.write_sav(
+                            out,
+                            path,
+                            column_labels=var_labels,
+                            variable_value_labels=value_labels,
+                        )
+                        with open(path, "rb") as f:
+                            sav = f.read()
+                        st.download_button(
+                            "下载 .sav（含标签）",
+                            data=sav,
+                            file_name="synthetic_data.sav",
+                            mime="application/octet-stream",
+                        )
+                    finally:
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                else:
+                    st.info("未安装 pyreadstat：可以用 CSV + .sps 在 SPSS 中导入，效果相同。")

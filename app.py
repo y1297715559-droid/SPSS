@@ -362,12 +362,19 @@ with tabs[1]:
             st.session_state.config = cfg
             st.rerun()
         else:
+            # —— 这里是修好的版本：只要有名字，就保留维度，题目可以暂时为空 ——
             new_dims = {}
             for i, (orig_name, qid_list) in enumerate(dims_items):
-                name = st.session_state.get(f"dim_name_{i}", "").strip()
-                items = st.session_state.get(f"dim_items_{i}", [])
-                if name and items:
-                    new_dims[name] = sorted(items)
+                # 名称：优先用用户当前在输入框里的；如果为空就用原来的
+                name = st.session_state.get(f"dim_name_{i}", "").strip() or orig_name
+                # 题目列表：如果当前 multiselect 还没产生值，就沿用原来的 qid_list
+                items = st.session_state.get(f"dim_items_{i}", None)
+                if items is None:
+                    items = qid_list
+                # 只要有名字就保留这个维度（题目可以暂时为空，以后再选）
+                if name:
+                    new_dims[name] = sorted(set(items))
+
             cfg["dimensions"] = new_dims
 
         if not cfg["dimensions"]:
@@ -417,14 +424,14 @@ with tabs[1]:
                     if not sub_name:
                         continue
                     q_tokens = [t.strip() for t in q_part.split(",") if t.strip()]
-                    qid_list = []
+                    qid_list_tmp = []
                     for token in q_tokens:
                         if token.isdigit():
                             q_val = int(token)
                             if q_val in qids_big:  # 必须在大维度里
-                                qid_list.append(q_val)
-                    if qid_list:
-                        sub_dict[sub_name] = sorted(set(qid_list))
+                                qid_list_tmp.append(q_val)
+                    if qid_list_tmp:
+                        sub_dict[sub_name] = sorted(set(qid_list_tmp))
                 new_subdims_all[big_dim] = sub_dict
 
                 if sub_dict:

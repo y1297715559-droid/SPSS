@@ -249,6 +249,8 @@ with tabs[1]:
                 "dimensions": {
                     "A_dim": [q for q in all_qids if default_start <= q < default_start + 10],
                 },
+                # 新增：小维度（按大维度划分），默认空
+                "subdimensions": {},
                 "demo": {
                     # 是否启用
                     "use_Q1": False,
@@ -280,11 +282,6 @@ with tabs[1]:
                     "type": "部分中介",
                 },
                 # 每个维度上的人口学差异 β
-                # gender: 女生>0 男生>0
-                # grade: 高年级>0 低年级>0
-                # origin: 农村>0 城镇>0
-                # cadre: 班干部>0 非班干部>0
-                # only: 独生>0 非独生>0
                 "demo_effects": {
                     "A_dim": {
                         "gender": 0.6,
@@ -323,7 +320,7 @@ with tabs[1]:
         scale_qids = [qid for qid in all_qids if qid >= cfg["scale_start_qid"]]
 
         # ------- 维度设置：多选题号 + 增删 -------
-        st.markdown("### 维度设置（大维度 = 若干题目的集合）")
+        st.markdown("### 大维度设置（大维度 = 若干题目的集合）")
         st.caption("每个维度下，直接多选题号；想删就点“删除本维度”，想加就点“➕ 新增维度”。")
 
         dims_dict = cfg.get("dimensions", {})
@@ -376,7 +373,68 @@ with tabs[1]:
         if not cfg["dimensions"]:
             st.warning("当前还没有任何维度，请点击“➕ 新增维度”创建。")
         else:
-            st.success(f"当前共有 {len(cfg['dimensions'])} 个维度。")
+            st.success(f"当前共有 {len(cfg['dimensions'])} 个大维度。")
+
+        # ------- 新增：小维度设置 -------
+        st.markdown("### 小维度设置（可选，大维度内部再分）")
+        st.caption(
+            "每个大维度下可以再划分若干小维度。每行格式：小维度名称:题号,题号,题号\n"
+            "小维度的题目必须是该大维度内已有的题目，否则会被忽略。"
+        )
+
+        subdims_all = cfg.get("subdimensions", {})
+        if not isinstance(subdims_all, dict):
+            subdims_all = {}
+
+        new_subdims_all = {}
+
+        for big_dim, qids_big in cfg["dimensions"].items():
+            with st.expander(f"大维度「{big_dim}」的小维度设置", expanded=False):
+                exist_sub = subdims_all.get(big_dim, {})
+                lines = []
+                for sub_name, qids in exist_sub.items():
+                    if not qids:
+                        continue
+                    line = f"{sub_name}:{','.join(str(q) for q in qids)}"
+                    lines.append(line)
+                default_text = "\n".join(lines)
+                txt = st.text_area(
+                    "每行一个小维度（示例：行为拖延:6,7,8,9,10）",
+                    value=default_text,
+                    key=f"subdim_text_{big_dim}",
+                    height=120,
+                )
+
+                sub_dict = {}
+                for line in txt.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if ":" not in line:
+                        continue
+                    name_part, q_part = line.split(":", 1)
+                    sub_name = name_part.strip()
+                    if not sub_name:
+                        continue
+                    q_tokens = [t.strip() for t in q_part.split(",") if t.strip()]
+                    qid_list = []
+                    for token in q_tokens:
+                        if token.isdigit():
+                            q_val = int(token)
+                            if q_val in qids_big:  # 必须在大维度里
+                                qid_list.append(q_val)
+                    if qid_list:
+                        sub_dict[sub_name] = sorted(set(qid_list))
+                new_subdims_all[big_dim] = sub_dict
+
+                if sub_dict:
+                    st.info("当前小维度配置：\n" + "\n".join(
+                        [f"{k}: {v}" for k, v in sub_dict.items()]
+                    ))
+                else:
+                    st.info("当前未设置小维度。")
+
+        cfg["subdimensions"] = new_subdims_all
 
         # ------- 反向题 -------
         rev_txt = st.text_input(
@@ -668,6 +726,7 @@ with tabs[2]:
             new_demo_effects = {}
             for _, row in df_demo_edit.iterrows():
                 dim_name = row["维度"]
+
                 def _safe(v):
                     try:
                         return float(v)
@@ -889,8 +948,8 @@ with tabs[3]:
 
                 # 6) 潜变量 → 题目分数（只对 qid >= scale_start_qid 的题目生成 1~5）
                 qid_to_dim = {}
-                for d, qids in dims_map.items():
-                    for qid in qids:
+                for d in dim_names:
+                    for qid in dims_map[d]:
                         qid_to_dim[qid] = d
                 rev = set(cfg.get("reverse_items", []))
 
@@ -918,17 +977,38 @@ with tabs[3]:
                             x = 6 - x
                         out[f"Q{qid}"] = x
 
-                # 7) 各维度均分
+                # 7) 各维度均分 + 小维度均分
                 cols = ["ID"]
                 for qid in all_qids:
                     col = f"Q{qid}"
                     if col in out.columns:
                         cols.append(col)
+
+                # 大维度均分
                 for d in dim_names:
                     qcols = [f"Q{qid}" for qid in dims_map[d] if f"Q{qid}" in out.columns]
                     if qcols:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
+
+                # 小维度均分
+                subdims_all = cfg.get("subdimensions", {})
+                if isinstance(subdims_all, dict):
+                    for big_dim, subdict in subdims_all.items():
+                        if not isinstance(subdict, dict):
+                            continue
+                        for sub_name, qids in subdict.items():
+                            if not qids:
+                                continue
+                            qcols = [f"Q{qid}" for qid in qids if f"Q{qid}" in out.columns]
+                            if not qcols:
+                                continue
+                            # 变量名：大维度_小维度_mean（去掉小维度名里的空格/特殊字符）
+                            safe_sub = re.sub(r"\W+", "", sub_name)
+                            col_name = f"{big_dim}_{safe_sub}_mean"
+                            out[col_name] = out[qcols].mean(axis=1)
+                            cols.append(col_name)
+
                 out = out[cols]
 
                 st.session_state.generated = out
@@ -947,7 +1027,21 @@ with tabs[3]:
                         var_labels[col] = q["stem"][:240]
                 for d in dim_names:
                     if f"{d}_mean" in out.columns:
-                        var_labels[f"{d}_mean"] = f"{d}（均分）"
+                        var_labels[f"{d}_mean"] = f"{d}（大维度均分）"
+
+                # 小维度标签
+                subdims_all = cfg.get("subdimensions", {})
+                if isinstance(subdims_all, dict):
+                    for big_dim, subdict in subdims_all.items():
+                        if not isinstance(subdict, dict):
+                            continue
+                        for sub_name, qids in subdict.items():
+                            if not qids:
+                                continue
+                            safe_sub = re.sub(r"\W+", "", sub_name)
+                            col_name = f"{big_dim}_{safe_sub}_mean"
+                            if col_name in out.columns:
+                                var_labels[col_name] = f"{big_dim}-{sub_name}（小维度均分）"
 
                 # 值标签
                 value_labels = {}

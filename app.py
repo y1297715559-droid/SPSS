@@ -105,12 +105,6 @@ def generate_latents(n, dim_names, corr_matrix=None, seed=42):
     return pd.DataFrame(Z, columns=dim_names)
 
 
-def apply_group_effect(df_latents, group, target_dim, beta):
-    """性别等分组效应：在目标维度上加一个 β*group"""
-    df_latents[target_dim] = df_latents[target_dim] + beta * group
-    return df_latents
-
-
 def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
     """
     中介模型：A -> C -> B
@@ -192,7 +186,14 @@ if "config" not in st.session_state:
     st.session_state.config = {}
 
 st.title("问卷解析 + 维度/关系约束 + SPSS数据生成器（本地网页）")
-tabs = st.tabs(["1) 导入/解析问卷", "2) 维度与计分 & 人口学", "3) 关系约束（差异/相关/中介）", "4) 生成与导出"])
+tabs = st.tabs(
+    [
+        "1) 导入/解析问卷",
+        "2) 维度与计分 & 人口学",
+        "3) 关系约束（人口学差异/相关/中介）",
+        "4) 生成与导出",
+    ]
+)
 
 # ---------- Tab 1: 导入/解析 ----------
 with tabs[0]:
@@ -268,7 +269,6 @@ with tabs[1]:
                     "loading": 0.80,
                     "noise": 0.75,
                 },
-                "gender_effect": {"target_dim": "A_dim", "beta": 0.6},
                 "corr_constraint": {"d1": "A_dim", "d2": "A_dim", "rho": 0.0},
                 "mediation": {
                     "A": "A_dim",
@@ -278,6 +278,21 @@ with tabs[1]:
                     "b": 0.6,
                     "cprime": 0.2,
                     "type": "部分中介",
+                },
+                # 每个维度上的人口学差异 β
+                # gender: 女生>0 男生>0
+                # grade: 高年级>0 低年级>0
+                # origin: 农村>0 城镇>0
+                # cadre: 班干部>0 非班干部>0
+                # only: 独生>0 非独生>0
+                "demo_effects": {
+                    "A_dim": {
+                        "gender": 0.6,
+                        "grade": 0.0,
+                        "origin": 0.0,
+                        "cadre": 0.0,
+                        "only": 0.0,
+                    },
                 },
             }
         cfg = st.session_state.config
@@ -307,15 +322,14 @@ with tabs[1]:
         # 可作为维度题的题号
         scale_qids = [qid for qid in all_qids if qid >= cfg["scale_start_qid"]]
 
-        # ------- 维度设置：更人性化，多选题号 + 增删 -------
+        # ------- 维度设置：多选题号 + 增删 -------
         st.markdown("### 维度设置（大维度 = 若干题目的集合）")
-        st.caption("每个维度下，直接多选题号；想删就点“删除本维度”，想加就点“新增维度”。")
+        st.caption("每个维度下，直接多选题号；想删就点“删除本维度”，想加就点“➕ 新增维度”。")
 
         dims_dict = cfg.get("dimensions", {})
-        # 确保是有序遍历
         dims_items = list(dims_dict.items())
 
-        # 新增维度按钮（先处理，点击后立即刷新）
+        # 新增维度
         if st.button("➕ 新增维度"):
             base_name = "新维度"
             idx = 1
@@ -327,14 +341,12 @@ with tabs[1]:
             dims_dict[new_name] = []
             cfg["dimensions"] = dims_dict
             st.session_state.config = cfg
-            st.experimental_rerun()
+            st.rerun()
 
         delete_keys = []
-        # 用索引 i 来绑定组件 key
         for i, (orig_name, qid_list) in enumerate(dims_items):
             with st.expander(f"维度 {i+1}：{orig_name}", expanded=True):
                 new_name = st.text_input("维度名称", value=orig_name, key=f"dim_name_{i}")
-                # 确保默认值在可选题号里
                 valid_default = [qid for qid in qid_list if qid in scale_qids]
                 selected_qids = st.multiselect(
                     "包含题目（可多选）",
@@ -345,16 +357,14 @@ with tabs[1]:
                 if st.button("删除本维度", key=f"dim_del_{i}"):
                     delete_keys.append(orig_name)
 
-        # 如果有删除请求，处理后重跑
         if delete_keys:
             for k in delete_keys:
                 if k in dims_dict:
                     dims_dict.pop(k)
             cfg["dimensions"] = dims_dict
             st.session_state.config = cfg
-            st.experimental_rerun()
+            st.rerun()
         else:
-            # 否则，根据当前组件的取值，更新 cfg["dimensions"]
             new_dims = {}
             for i, (orig_name, qid_list) in enumerate(dims_items):
                 name = st.session_state.get(f"dim_name_{i}", "").strip()
@@ -371,7 +381,7 @@ with tabs[1]:
         # ------- 反向题 -------
         rev_txt = st.text_input(
             "反向题题号（逗号分隔）",
-            value=",".join(map(str, cfg.get("reverse_items", []))),
+            value=",".join(map(str, cfg.get("reverse_items", []))) if cfg.get("reverse_items") else "",
             help="例如：8,12,15 表示这些题目在 1~5 上按 1↔5 反向计分。",
         )
         cfg["reverse_items"] = [int(x.strip()) for x in rev_txt.split(",") if x.strip().isdigit()]
@@ -381,7 +391,6 @@ with tabs[1]:
         st.caption("勾选表示生成该人口学变量，不勾选则完全不生成。百分比是“目标比例”，系统会自动归一化。")
 
         demo = cfg.get("demo", {})
-        # 默认 demo 结构补齐
         demo.setdefault("use_Q1", False)
         demo.setdefault("use_Q2", False)
         demo.setdefault("use_Q3", False)
@@ -605,7 +614,7 @@ with tabs[1]:
 
 # ---------- Tab 3: 关系约束 ----------
 with tabs[2]:
-    st.subheader("关系约束：性别差异、维度相关、中介模型")
+    st.subheader("关系约束：各人口学差异・维度相关・中介模型")
     cfg = st.session_state.config
     qs = st.session_state.questions
     if not cfg or not qs:
@@ -615,25 +624,74 @@ with tabs[2]:
         if len(dims) < 1:
             st.warning("维度数量不足，请先在第 2 页配置。")
         else:
-            # 性别差异
-            st.markdown("### 性别差异（基于内部性别变量 0=男 1=女）")
-            target_default = cfg.get("gender_effect", {}).get("target_dim", dims[0])
-            if target_default not in dims:
-                target_default = dims[0]
-            target = st.selectbox("目标维度", dims, index=dims.index(target_default))
-            beta_default = float(cfg.get("gender_effect", {}).get("beta", 0.6))
-            beta = st.slider("β（女生相对男生的平均差异）", -1.5, 1.5, beta_default, 0.05)
-            cfg["gender_effect"] = {"target_dim": target, "beta": float(beta)}
+            # ---- 人口学差异表：每个维度 × 每个人口学变量 一个 β ----
+            st.markdown("### 人口学差异（按维度设置 β）")
+            st.caption(
+                "β>0 表示后面括号中的那一组平均更高，β<0 表示相反；β=0 表示该维度上这个人口学变量无差异。\n"
+                "性别β：女生更高>0；年级β：高年级更高>0；生源地β：农村生源更高>0；班干部β：班干部更高>0；独生β：独生子女更高>0。"
+            )
 
-            # 维度相关
+            demo_effects = cfg.get("demo_effects")
+            if not isinstance(demo_effects, dict):
+                demo_effects = {}
+            # 确保所有维度都有键
+            for d in dims:
+                demo_effects.setdefault(d, {})
+                demo_effects[d].setdefault("gender", 0.0)
+                demo_effects[d].setdefault("grade", 0.0)
+                demo_effects[d].setdefault("origin", 0.0)
+                demo_effects[d].setdefault("cadre", 0.0)
+                demo_effects[d].setdefault("only", 0.0)
+
+            rows = []
+            for d in dims:
+                eff = demo_effects.get(d, {})
+                rows.append(
+                    {
+                        "维度": d,
+                        "性别β(女高>0,男高<0)": float(eff.get("gender", 0.0)),
+                        "年级β(高年级高>0)": float(eff.get("grade", 0.0)),
+                        "生源地β(农村高>0)": float(eff.get("origin", 0.0)),
+                        "班干部β(班干部高>0)": float(eff.get("cadre", 0.0)),
+                        "独生β(独生高>0)": float(eff.get("only", 0.0)),
+                    }
+                )
+            df_demo = pd.DataFrame(rows)
+
+            df_demo_edit = st.data_editor(
+                df_demo,
+                num_rows="fixed",
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            new_demo_effects = {}
+            for _, row in df_demo_edit.iterrows():
+                dim_name = row["维度"]
+                def _safe(v):
+                    try:
+                        return float(v)
+                    except Exception:
+                        return 0.0
+
+                new_demo_effects[dim_name] = {
+                    "gender": _safe(row["性别β(女高>0,男高<0)"]),
+                    "grade": _safe(row["年级β(高年级高>0)"]),
+                    "origin": _safe(row["生源地β(农村高>0)"]),
+                    "cadre": _safe(row["班干部β(班干部高>0)"]),
+                    "only": _safe(row["独生β(独生高>0)"]),
+                }
+            cfg["demo_effects"] = new_demo_effects
+
+            # ---- 维度相关 ----
             st.markdown("### 维度相关（设置一对维度的相关系数）")
             cc = cfg.get("corr_constraint", {})
             d1_default = cc.get("d1", dims[0])
             if d1_default not in dims:
                 d1_default = dims[0]
-            d2_default = cc.get("d2", dims[min(1, len(dims)-1)])
+            d2_default = cc.get("d2", dims[min(1, len(dims) - 1)])
             if d2_default not in dims:
-                d2_default = dims[min(1, len(dims)-1)]
+                d2_default = dims[min(1, len(dims) - 1)]
             rho_default = float(cc.get("rho", 0.0))
 
             d1 = st.selectbox("维度 A", dims, index=dims.index(d1_default), key="corr_d1")
@@ -641,29 +699,34 @@ with tabs[2]:
             rho = st.slider("期望相关系数 ρ", -0.9, 0.9, rho_default, 0.05)
             cfg["corr_constraint"] = {"d1": d1, "d2": d2, "rho": float(rho)}
 
-            # 中介模型
+            # ---- 中介模型 ----
             st.markdown("### 中介：A→C→B")
             med = cfg.get("mediation", {})
             A_default = med.get("A", dims[0])
-            C_default = med.get("C", dims[min(1, len(dims)-1)])
-            B_default = med.get("B", dims[min(2, len(dims)-1)])
+            C_default = med.get("C", dims[min(1, len(dims) - 1)])
+            B_default = med.get("B", dims[min(2, len(dims) - 1)])
 
             if A_default not in dims:
                 A_default = dims[0]
             if C_default not in dims:
-                C_default = dims[min(1, len(dims)-1)]
+                C_default = dims[min(1, len(dims) - 1)]
             if B_default not in dims:
-                B_default = dims[min(2, len(dims)-1)]
+                B_default = dims[min(2, len(dims) - 1)]
 
             A = st.selectbox("A（自变量）", dims, index=dims.index(A_default), key="med_A")
             C = st.selectbox("C（中介变量）", dims, index=dims.index(C_default), key="med_C")
             B = st.selectbox("B（因变量）", dims, index=dims.index(B_default), key="med_B")
-            med_type = st.radio("中介类型", ["完全中介", "部分中介"], index=1 if med.get("type", "部分中介") == "部分中介" else 0, horizontal=True)
+            med_type = st.radio(
+                "中介类型",
+                ["完全中介", "部分中介"],
+                index=1 if med.get("type", "部分中介") == "部分中介" else 0,
+                horizontal=True,
+            )
             a_default = float(med.get("a", 0.6))
             b_default = float(med.get("b", 0.6))
             cprime_default = float(med.get("cprime", 0.2 if med_type == "部分中介" else 0.0))
             a = st.slider("路径 a（A→C）", 0.0, 1.2, a_default, 0.05)
-            b = st.slider("路径 b（C→B）", 0.0, 1.2, b_default, 0.05)
+            b_path = st.slider("路径 b（C→B）", 0.0, 1.2, b_default, 0.05)
             cprime = 0.0 if med_type == "完全中介" else st.slider(
                 "直接效应 c'（A→B）", 0.0, 1.2, cprime_default, 0.05
             )
@@ -672,7 +735,7 @@ with tabs[2]:
                 "C": C,
                 "B": B,
                 "a": float(a),
-                "b": float(b),
+                "b": float(b_path),
                 "cprime": float(cprime),
                 "type": med_type,
             }
@@ -716,26 +779,84 @@ with tabs[3]:
 
             if st.button("生成数据", type="primary"):
                 rng = np.random.default_rng(seed)
-
-                # 1) 大维度潜变量
-                Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
-
-                # 2) 性别潜变量（内部用）+ 性别效应
                 demo = cfg.get("demo", {})
+
+                # 1) 内部人口学变量（始终生成，用于差异；是否输出列由 use_Q* 决定）
+
+                # 性别：1=男 2=女，内部编码 gender01：男=0，女=1
                 q1_perc = demo.get("Q1_perc", [50.0, 50.0])
                 if not q1_perc or sum(q1_perc) <= 0:
                     q1_perc = [50.0, 50.0]
                 probs_gender = np.array(q1_perc[:2], dtype=float)
                 probs_gender = probs_gender / probs_gender.sum()
-                # gender01: 0=男, 1=女（第二个）
-                gender_vals = rng.choice([0, 1], size=N, p=probs_gender)
-                gender01 = gender_vals.copy()
+                gender_cat = rng.choice([1, 2], size=N, p=probs_gender)
+                gender01 = (gender_cat == 2).astype(float)  # 女=1
 
-                ge = cfg.get("gender_effect")
-                if ge and ge.get("target_dim") in Z.columns:
-                    Z = apply_group_effect(Z, gender01, ge["target_dim"], float(ge.get("beta", 0.0)))
+                # 年级：1..grade_levels，内部编码 grade_num: 0,1,2,...
+                grade_levels = int(demo.get("grade_levels", 3))
+                if grade_levels not in (3, 4):
+                    grade_levels = 3
+                q2_perc = demo.get("Q2_perc", [35.0, 40.0, 25.0, 0.0])
+                if not q2_perc or sum(q2_perc) <= 0:
+                    q2_perc = [100.0 / grade_levels] * grade_levels
+                probs_q2 = np.array(q2_perc[:grade_levels], dtype=float)
+                probs_q2 = probs_q2 / probs_q2.sum()
+                grade_cat = rng.choice(list(range(1, grade_levels + 1)), size=N, p=probs_q2)
+                grade_num = (grade_cat - 1).astype(float)  # 大一=0, 大二=1, ...
 
-                # 3) 中介结构
+                # 生源地：1=城镇 2=农村，内部 origin01：城镇=0，农村=1
+                q3p = demo.get("Q3_perc", [55.0, 45.0])
+                if not q3p or sum(q3p) <= 0:
+                    q3p = [50.0, 50.0]
+                probs_q3 = np.array(q3p[:2], dtype=float)
+                probs_q3 = probs_q3 / probs_q3.sum()
+                origin_cat = rng.choice([1, 2], size=N, p=probs_q3)
+                origin01 = (origin_cat == 2).astype(float)
+
+                # 班干部：1=是 2=否，内部 cadre01：否=0，是=1
+                q4p = demo.get("Q4_perc", [28.0, 72.0])
+                if not q4p or sum(q4p) <= 0:
+                    q4p = [50.0, 50.0]
+                probs_q4 = np.array(q4p[:2], dtype=float)
+                probs_q4 = probs_q4 / probs_q4.sum()
+                cadre_cat = rng.choice([1, 2], size=N, p=probs_q4)
+                cadre01 = (cadre_cat == 1).astype(float)
+
+                # 独生子女：1=独生 2=非独生，内部 only01：非独生=0，独生=1
+                q5p = demo.get("Q5_perc", [38.0, 62.0])
+                if not q5p or sum(q5p) <= 0:
+                    q5p = [50.0, 50.0]
+                probs_q5 = np.array(q5p[:2], dtype=float)
+                probs_q5 = probs_q5 / probs_q5.sum()
+                only_cat = rng.choice([1, 2], size=N, p=probs_q5)
+                only01 = (only_cat == 1).astype(float)
+
+                # 2) 大维度潜变量
+                Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
+
+                # 3) 应用人口学差异 β（在潜变量层面）
+                demo_effects = cfg.get("demo_effects", {})
+                for d in dim_names:
+                    eff = demo_effects.get(d, {})
+                    if not isinstance(eff, dict):
+                        eff = {}
+                    b_gender = float(eff.get("gender", 0.0) or 0.0)
+                    b_grade = float(eff.get("grade", 0.0) or 0.0)
+                    b_origin = float(eff.get("origin", 0.0) or 0.0)
+                    b_cadre = float(eff.get("cadre", 0.0) or 0.0)
+                    b_only = float(eff.get("only", 0.0) or 0.0)
+
+                    if any(abs(x) > 0 for x in [b_gender, b_grade, b_origin, b_cadre, b_only]):
+                        delta = (
+                            b_gender * gender01
+                            + b_grade * grade_num
+                            + b_origin * origin01
+                            + b_cadre * cadre01
+                            + b_only * only01
+                        )
+                        Z[d] = Z[d] + delta
+
+                # 4) 中介结构
                 med = cfg.get("mediation")
                 if med:
                     A, C, B = med["A"], med["C"], med["B"]
@@ -751,54 +872,22 @@ with tabs[3]:
                             seed=seed + 7,
                         )
 
-                # 4) 构造输出数据框
+                # 5) 构造输出数据框
                 out = pd.DataFrame({"ID": np.arange(1, N + 1)})
 
-                # 人口学变量按启用情况生成
-                # Q1 性别：1=男 2=女
+                # 人口学变量按启用情况生成列
                 if demo.get("use_Q1", False):
-                    out["Q1"] = np.where(gender_vals == 0, 1, 2)
-
-                # Q2 年级
+                    out["Q1"] = gender_cat  # 1=男 2=女
                 if demo.get("use_Q2", False):
-                    grade_levels = int(demo.get("grade_levels", 3))
-                    if grade_levels not in (3, 4):
-                        grade_levels = 3
-                    q2_perc = demo.get("Q2_perc", [35.0, 40.0, 25.0, 0.0])
-                    if not q2_perc or sum(q2_perc) <= 0:
-                        q2_perc = [100.0 / grade_levels] * grade_levels
-                    probs_q2 = np.array(q2_perc[:grade_levels], dtype=float)
-                    probs_q2 = probs_q2 / probs_q2.sum()
-                    out["Q2"] = rng.choice(list(range(1, grade_levels + 1)), size=N, p=probs_q2)
-
-                # Q3 生源地：1=城镇 2=农村
+                    out["Q2"] = grade_cat
                 if demo.get("use_Q3", False):
-                    q3p = demo.get("Q3_perc", [55.0, 45.0])
-                    if not q3p or sum(q3p) <= 0:
-                        q3p = [50.0, 50.0]
-                    probs_q3 = np.array(q3p[:2], dtype=float)
-                    probs_q3 = probs_q3 / probs_q3.sum()
-                    out["Q3"] = rng.choice([1, 2], size=N, p=probs_q3)
-
-                # Q4 班干部：1=是 2=否
+                    out["Q3"] = origin_cat
                 if demo.get("use_Q4", False):
-                    q4p = demo.get("Q4_perc", [28.0, 72.0])
-                    if not q4p or sum(q4p) <= 0:
-                        q4p = [50.0, 50.0]
-                    probs_q4 = np.array(q4p[:2], dtype=float)
-                    probs_q4 = probs_q4 / probs_q4.sum()
-                    out["Q4"] = rng.choice([1, 2], size=N, p=probs_q4)
-
-                # Q5 独生子女：1=独生 2=非独生
+                    out["Q4"] = cadre_cat
                 if demo.get("use_Q5", False):
-                    q5p = demo.get("Q5_perc", [38.0, 62.0])
-                    if not q5p or sum(q5p) <= 0:
-                        q5p = [50.0, 50.0]
-                    probs_q5 = np.array(q5p[:2], dtype=float)
-                    probs_q5 = probs_q5 / probs_q5.sum()
-                    out["Q5"] = rng.choice([1, 2], size=N, p=probs_q5)
+                    out["Q5"] = only_cat
 
-                # 5) 潜变量 → 题目分数（只对 qid >= scale_start_qid 的题目生成 1~5）
+                # 6) 潜变量 → 题目分数（只对 qid >= scale_start_qid 的题目生成 1~5）
                 qid_to_dim = {}
                 for d, qids in dims_map.items():
                     for qid in qids:
@@ -811,7 +900,6 @@ with tabs[3]:
                 item_noise = float(item_params.get("noise", 0.75))
 
                 for d in dim_names:
-                    # 找到属于该维度且 >= scale_start_qid 的题号
                     qids = [qid for qid, dd in qid_to_dim.items() if dd == d and qid >= scale_start_qid]
                     if not qids:
                         continue
@@ -822,7 +910,7 @@ with tabs[3]:
                         mean=item_mean,
                         loading=item_loading,
                         noise=item_noise,
-                        seed=seed + 13 + hash(d) % 1000,
+                        seed=seed + 13 + (hash(d) % 1000),
                     )
                     for idx, qid in enumerate(qids):
                         x = disc[:, idx]
@@ -830,9 +918,8 @@ with tabs[3]:
                             x = 6 - x
                         out[f"Q{qid}"] = x
 
-                # 6) 各维度均分
+                # 7) 各维度均分
                 cols = ["ID"]
-                # 按题号顺序添加 Q 列
                 for qid in all_qids:
                     col = f"Q{qid}"
                     if col in out.columns:
@@ -858,7 +945,6 @@ with tabs[3]:
                     col = f"Q{q['qid']}"
                     if col in out.columns:
                         var_labels[col] = q["stem"][:240]
-                # 维度均分标签
                 for d in dim_names:
                     if f"{d}_mean" in out.columns:
                         var_labels[f"{d}_mean"] = f"{d}（均分）"
@@ -867,10 +953,8 @@ with tabs[3]:
                 value_labels = {}
                 demo = cfg.get("demo", {})
 
-                # Q1
                 if "Q1" in out.columns:
                     value_labels["Q1"] = {1: "男", 2: "女"}
-                # Q2
                 if "Q2" in out.columns:
                     grade_levels = int(demo.get("grade_levels", 3))
                     if grade_levels not in (3, 4):
@@ -880,13 +964,10 @@ with tabs[3]:
                     else:
                         q2_labels = {1: "大一", 2: "大二", 3: "大三", 4: "大四"}
                     value_labels["Q2"] = q2_labels
-                # Q3
                 if "Q3" in out.columns:
                     value_labels["Q3"] = {1: "城镇", 2: "农村"}
-                # Q4
                 if "Q4" in out.columns:
                     value_labels["Q4"] = {1: "是", 2: "否"}
-                # Q5
                 if "Q5" in out.columns:
                     value_labels["Q5"] = {1: "独生子女", 2: "非独生子女"}
 

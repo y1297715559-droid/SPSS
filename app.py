@@ -45,7 +45,7 @@ try:
 except Exception:
     HAS_PYREADSTAT = False
 
-st.set_page_config(page_title="问卷解析 + SPSS数据生成器", layout="wide")
+st.set_page_config(page_title="问卷解析 + 维度/关系约束 + SPSS数据生成器", layout="wide")
 
 
 # ---------- 基础函数 ----------
@@ -192,6 +192,8 @@ if "config" not in st.session_state:
     st.session_state.config = {}
 if "raw_text" not in st.session_state:
     st.session_state.raw_text = ""
+if "cfg_json_text" not in st.session_state:
+    st.session_state.cfg_json_text = ""
 
 st.title("问卷解析 + 维度/关系约束 + SPSS数据生成器（本地网页）")
 tabs = st.tabs(
@@ -306,9 +308,13 @@ with tabs[1]:
         # 样本量 & seed
         c1, c2 = st.columns([1, 1])
         with c1:
-            cfg["N"] = st.number_input("样本量 N", 30, 5000, int(cfg.get("N", 630)), 10)
+            cfg["N"] = int(
+                st.number_input("样本量 N", 30, 5000, int(cfg.get("N", 630)), 10)
+            )
         with c2:
-            cfg["seed"] = st.number_input("随机种子 seed", 0, 10000, int(cfg.get("seed", 42)), 1)
+            cfg["seed"] = int(
+                st.number_input("随机种子 seed", 0, 10000, int(cfg.get("seed", 42)), 1)
+            )
 
         # 量表维度起始题号（你可以自选从第几题开始）
         default_start_qid = int(cfg.get("scale_start_qid", 6))
@@ -318,9 +324,9 @@ with tabs[1]:
             default_start_qid = max_qid
         scale_start_qid = st.number_input(
             "量表维度起始题号（从这道题开始，后面的题才用于维度和 1~5 计分）",
-            min_value=min_qid,
-            max_value=max_qid,
-            value=default_start_qid,
+            min_value=int(min_qid),
+            max_value=int(max_qid),
+            value=int(default_start_qid),
             step=1,
         )
         cfg["scale_start_qid"] = int(scale_start_qid)
@@ -333,6 +339,8 @@ with tabs[1]:
         st.caption("每个维度下，直接多选题号；想删就点“删除本维度”，想加就点“➕ 新增维度”。")
 
         dims_dict = cfg.get("dimensions", {})
+        if not isinstance(dims_dict, dict):
+            dims_dict = {}
         dims_items = list(dims_dict.items())
 
         # 新增维度
@@ -353,10 +361,10 @@ with tabs[1]:
         for i, (orig_name, qid_list) in enumerate(dims_items):
             with st.expander(f"维度 {i+1}：{orig_name}", expanded=True):
                 new_name = st.text_input("维度名称", value=orig_name, key=f"dim_name_{i}")
-                valid_default = [qid for qid in qid_list if qid in scale_qids]
+                valid_default = [int(qid) for qid in qid_list if qid in scale_qids]
                 selected_qids = st.multiselect(
                     "包含题目（可多选）",
-                    options=scale_qids,
+                    options=[int(q) for q in scale_qids],
                     default=valid_default,
                     key=f"dim_items_{i}",
                 )
@@ -371,7 +379,7 @@ with tabs[1]:
             st.session_state.config = cfg
             st.rerun()
         else:
-            # 修复“新增维度有时加不上”的问题：只要有名字就保留，题目可以暂时为空
+            # 只要有名字就保留，题目可以暂时为空
             new_dims = {}
             for i, (orig_name, qid_list) in enumerate(dims_items):
                 name = st.session_state.get(f"dim_name_{i}", "").strip() or orig_name
@@ -379,7 +387,7 @@ with tabs[1]:
                 if items is None:
                     items = qid_list
                 if name:
-                    new_dims[name] = sorted(set(items))
+                    new_dims[name] = sorted(set(int(x) for x in items))
             cfg["dimensions"] = new_dims
 
         if not cfg["dimensions"]:
@@ -404,11 +412,12 @@ with tabs[1]:
             with st.expander(f"大维度「{big_dim}」的小维度设置", expanded=False):
                 exist_sub = subdims_all.get(big_dim, {})
                 lines = []
-                for sub_name, qids in exist_sub.items():
-                    if not qids:
-                        continue
-                    line = f"{sub_name}:{','.join(str(q) for q in qids)}"
-                    lines.append(line)
+                if isinstance(exist_sub, dict):
+                    for sub_name, qids in exist_sub.items():
+                        if not qids:
+                            continue
+                        line = f"{sub_name}:{','.join(str(q) for q in qids)}"
+                        lines.append(line)
                 default_text = "\n".join(lines)
                 txt = st.text_area(
                     "每行一个小维度（示例：行为拖延:6,7,8,9,10）",
@@ -442,9 +451,10 @@ with tabs[1]:
                 new_subdims_all[big_dim] = sub_dict
 
                 if sub_dict:
-                    st.info("当前小维度配置：\n" + "\n".join(
-                        [f"{k}: {v}" for k, v in sub_dict.items()]
-                    ))
+                    st.info(
+                        "当前小维度配置：\n"
+                        + "\n".join([f"{k}: {v}" for k, v in sub_dict.items()])
+                    )
                 else:
                     st.info("当前未设置小维度。")
 
@@ -456,13 +466,17 @@ with tabs[1]:
             value=",".join(map(str, cfg.get("reverse_items", []))) if cfg.get("reverse_items") else "",
             help="例如：8,12,15 表示这些题目在 1~5 上按 1↔5 反向计分。",
         )
-        cfg["reverse_items"] = [int(x.strip()) for x in rev_txt.split(",") if x.strip().isdigit()]
+        cfg["reverse_items"] = [
+            int(x.strip()) for x in rev_txt.split(",") if x.strip().isdigit()
+        ]
 
         # ------- 人口学变量：全部可选 + 百分比可精细设置 -------
         st.markdown("### 人口学变量分布（全部可选）")
         st.caption("勾选表示生成该人口学变量，不勾选则完全不生成。百分比是“目标比例”，系统会自动归一化。")
 
         demo = cfg.get("demo", {})
+        if not isinstance(demo, dict):
+            demo = {}
         demo.setdefault("use_Q1", False)
         demo.setdefault("use_Q2", False)
         demo.setdefault("use_Q3", False)
@@ -477,38 +491,42 @@ with tabs[1]:
 
         with st.expander("展开人口学设置", expanded=False):
             # Q1 性别
-            use_q1 = st.checkbox("启用 Q1：您的性别（1=男 2=女）", value=demo.get("use_Q1", False))
+            use_q1 = st.checkbox("启用 Q1：您的性别（1=男 2=女）", value=bool(demo.get("use_Q1", False)))
             demo["use_Q1"] = use_q1
             if use_q1:
-                q1p = demo.get("Q1_perc", [50.0, 50.0])
+                q1p = list(demo.get("Q1_perc", [50.0, 50.0]))
                 while len(q1p) < 2:
                     q1p.append(0.0)
                 c1, c2 = st.columns(2)
                 with c1:
-                    q1_male = st.number_input(
-                        "男 (%)",
-                        0.0,
-                        100.0,
-                        float(q1p[0]),
-                        1.0,
-                        help="例如 40 表示约 40%。",
-                        key="q1_male",
+                    q1_male = float(
+                        st.number_input(
+                            "男 (%)",
+                            0.0,
+                            100.0,
+                            float(q1p[0]),
+                            1.0,
+                            help="例如 40 表示约 40%。",
+                            key="q1_male",
+                        )
                     )
                 with c2:
-                    q1_female = st.number_input(
-                        "女 (%)",
-                        0.0,
-                        100.0,
-                        float(q1p[1]),
-                        1.0,
-                        key="q1_female",
+                    q1_female = float(
+                        st.number_input(
+                            "女 (%)",
+                            0.0,
+                            100.0,
+                            float(q1p[1]),
+                            1.0,
+                            key="q1_female",
+                        )
                     )
                 demo["Q1_perc"] = [q1_male, q1_female]
 
             st.markdown("---")
 
             # Q2 年级
-            use_q2 = st.checkbox("启用 Q2：您的年级", value=demo.get("use_Q2", False))
+            use_q2 = st.checkbox("启用 Q2：您的年级", value=bool(demo.get("use_Q2", False)))
             demo["use_Q2"] = use_q2
             grade_levels = int(demo.get("grade_levels", 3))
             if grade_levels not in (3, 4):
@@ -517,7 +535,7 @@ with tabs[1]:
             demo["grade_levels"] = int(grade_levels)
 
             if use_q2:
-                q2p = demo.get("Q2_perc", [35.0, 40.0, 25.0, 0.0])
+                q2p = list(demo.get("Q2_perc", [35.0, 40.0, 25.0, 0.0]))
                 while len(q2p) < grade_levels:
                     q2p.append(0.0)
                 cols = st.columns(grade_levels)
@@ -525,13 +543,15 @@ with tabs[1]:
                 new_q2p = []
                 for idx in range(grade_levels):
                     with cols[idx]:
-                        val = st.number_input(
-                            labels[idx],
-                            0.0,
-                            100.0,
-                            float(q2p[idx]),
-                            1.0,
-                            key=f"q2_{idx+1}",
+                        val = float(
+                            st.number_input(
+                                labels[idx],
+                                0.0,
+                                100.0,
+                                float(q2p[idx]),
+                                1.0,
+                                key=f"q2_{idx+1}",
+                            )
                         )
                         new_q2p.append(val)
                 demo["Q2_perc"] = new_q2p
@@ -539,85 +559,102 @@ with tabs[1]:
             st.markdown("---")
 
             # Q3 生源地
-            use_q3 = st.checkbox("启用 Q3：您的生源地（1=城镇 2=农村）", value=demo.get("use_Q3", False))
+            use_q3 = st.checkbox("启用 Q3：您的生源地（1=城镇 2=农村）", value=bool(demo.get("use_Q3", False)))
             demo["use_Q3"] = use_q3
             if use_q3:
-                q3p = demo.get("Q3_perc", [55.0, 45.0])
+                q3p = list(demo.get("Q3_perc", [55.0, 45.0]))
                 while len(q3p) < 2:
                     q3p.append(0.0)
                 c1, c2 = st.columns(2)
                 with c1:
-                    q3_town = st.number_input(
-                        "城镇 (%)",
-                        0.0,
-                        100.0,
-                        float(q3p[0]),
-                        1.0,
-                        key="q3_town",
+                    q3_town = float(
+                        st.number_input(
+                            "城镇 (%)",
+                            0.0,
+                            100.0,
+                            float(q3p[0]),
+                            1.0,
+                            key="q3_town",
+                        )
                     )
                 with c2:
-                    q3_rural = st.number_input(
-                        "农村 (%)", 0.0, 100.0, float(q3p[1]), 1.0, key="q3_rural"
+                    q3_rural = float(
+                        st.number_input(
+                            "农村 (%)",
+                            0.0,
+                            100.0,
+                            float(q3p[1]),
+                            1.0,
+                            key="q3_rural",
+                        )
                     )
                 demo["Q3_perc"] = [q3_town, q3_rural]
 
             st.markdown("---")
 
             # Q4 班干部
-            use_q4 = st.checkbox("启用 Q4：您是否担任班干部（1=是 2=否）", value=demo.get("use_Q4", False))
+            use_q4 = st.checkbox("启用 Q4：您是否担任班干部（1=是 2=否）", value=bool(demo.get("use_Q4", False)))
             demo["use_Q4"] = use_q4
             if use_q4:
-                q4p = demo.get("Q4_perc", [28.0, 72.0])
+                q4p = list(demo.get("Q4_perc", [28.0, 72.0]))
                 while len(q4p) < 2:
                     q4p.append(0.0)
                 c1, c2 = st.columns(2)
                 with c1:
-                    q4_yes = st.number_input(
-                        "是 (%)",
-                        0.0,
-                        100.0,
-                        float(q4p[0]),
-                        1.0,
-                        key="q4_yes",
+                    q4_yes = float(
+                        st.number_input(
+                            "是 (%)",
+                            0.0,
+                            100.0,
+                            float(q4p[0]),
+                            1.0,
+                            key="q4_yes",
+                        )
                     )
                 with c2:
-                    q4_no = st.number_input(
-                        "否 (%)",
-                        0.0,
-                        100.0,
-                        float(q4p[1]),
-                        1.0,
-                        key="q4_no",
+                    q4_no = float(
+                        st.number_input(
+                            "否 (%)",
+                            0.0,
+                            100.0,
+                            float(q4p[1]),
+                            1.0,
+                            key="q4_no",
+                        )
                     )
                 demo["Q4_perc"] = [q4_yes, q4_no]
 
             st.markdown("---")
 
             # Q5 独生子女
-            use_q5 = st.checkbox("启用 Q5：您是否独生子女（1=独生 2=非独生）", value=demo.get("use_Q5", False))
+            use_q5 = st.checkbox("启用 Q5：您是否独生子女（1=独生 2=非独生）", value=bool(demo.get("use_Q5", False)))
             demo["use_Q5"] = use_q5
             if use_q5:
-                q5p = demo.get("Q5_perc", [38.0, 62.0])
+                q5p = list(demo.get("Q5_perc", [38.0, 62.0]))
                 while len(q5p) < 2:
                     q5p.append(0.0)
                 c1, c2 = st.columns(2)
                 with c1:
-                    q5_yes = st.number_input(
-                        "独生子女 (%)",
-                        0.0,
-                        100.0,
-                        float(q5p[0]),
-                        1.0,
-                        key="q5_yes",
+                    q5_yes = float(
+                        st.number_input(
+                            "独生子女 (%)",
+                            0.0,
+                            100.0,
+                            float(q5p[0]),
+                            1.0,
+                            key="q5_yes",
+                        )
                     )
                 with c2:
-                    q5_no = st.number_input(
-                        "非独生子女 (%)",
-                        0.0,
-                        100.0,
-                        float(q5p[1]),
-                        1.0,
-                        key="q5_no",
+                    q5_no = float(
+                        st.number_input(
+                            "非独生子女 (%)",
+                            0.0,
+                            100.0,
+                            float(q5p[1]),
+                            1.0,
+                            key="q5_no",
+                        )
                     )
                 demo["Q5_perc"] = [q5_yes, q5_no]
 
@@ -626,38 +663,46 @@ with tabs[1]:
         # ------- 题目生成参数：平均值更精细 -------
         st.markdown("### 题目生成参数（控制平均值和离散度）")
         item_params = cfg.get("item_params", {})
+        if not isinstance(item_params, dict):
+            item_params = {}
         colm1, colm2, colm3 = st.columns(3)
         with colm1:
-            item_mean = st.number_input(
-                "题目平均值（1~5）",
-                1.0,
-                5.0,
-                float(item_params.get("mean", 3.60)),
-                0.01,
-                help="例如 3.20 或 3.75，可以非常精细地控制整体水平。",
+            item_mean = float(
+                st.number_input(
+                    "题目平均值（1~5）",
+                    1.0,
+                    5.0,
+                    float(item_params.get("mean", 3.60)),
+                    0.01,
+                    help="例如 3.20 或 3.75，可以非常精细地控制整体水平。",
+                )
             )
         with colm2:
-            item_loading = st.number_input(
-                "潜变量载荷（0~1.5）",
-                0.0,
-                1.5,
-                float(item_params.get("loading", 0.80)),
-                0.05,
-                help="越大，维度越“清晰”，维度差异越明显。",
+            item_loading = float(
+                st.number_input(
+                    "潜变量载荷（0~1.5）",
+                    0.0,
+                    1.5,
+                    float(item_params.get("loading", 0.80)),
+                    0.05,
+                    help="越大，维度越“清晰”，维度差异越明显。",
+                )
             )
         with colm3:
-            item_noise = st.number_input(
-                "题目噪声 SD",
-                0.0,
-                3.0,
-                float(item_params.get("noise", 0.75)),
-                0.05,
-                help="越大，数据越分散，越接近真实问卷的“杂乱度”。",
+            item_noise = float(
+                st.number_input(
+                    "题目噪声 SD",
+                    0.0,
+                    3.0,
+                    float(item_params.get("noise", 0.75)),
+                    0.05,
+                    help="越大，数据越分散，越接近真实问卷的“杂乱度”。",
+                )
             )
         cfg["item_params"] = {
-            "mean": float(item_mean),
-            "loading": float(item_loading),
-            "noise": float(item_noise),
+            "mean": item_mean,
+            "loading": item_loading,
+            "noise": item_noise,
         }
 
         # ------- config JSON 展示 & 导入/导出（包含前三个 Tab 的所有设置） -------
@@ -669,10 +714,15 @@ with tabs[1]:
             "config": cfg,
         }
 
+        # 用 session_state 缓存 JSON 文本，减少“输一次就被刷新掉”的感觉
+        if not st.session_state.cfg_json_text:
+            st.session_state.cfg_json_text = json.dumps(full_state, ensure_ascii=False, indent=2)
+
         cfg_json = st.text_area(
             "配置保存（包括问卷 + 维度/人口学 + 关系约束）",
-            value=json.dumps(full_state, ensure_ascii=False, indent=2),
+            value=st.session_state.cfg_json_text,
             height=220,
+            key="cfg_json_editor",
         )
 
         col_a, col_b = st.columns(2)
@@ -691,11 +741,14 @@ with tabs[1]:
                         else:
                             # 如果没有 questions，就用 raw_text 重新解析
                             if st.session_state.raw_text:
-                                st.session_state.questions = parse_survey_text(st.session_state.raw_text)
+                                st.session_state.questions = parse_survey_text(
+                                    st.session_state.raw_text
+                                )
                     else:
                         # 旧格式：整个 JSON 就是 config
                         st.session_state.config = loaded
 
+                    st.session_state.cfg_json_text = cfg_json
                     st.success("已应用上方 JSON（包含前三个 Tab 的设置）。")
                     st.rerun()
                 except Exception as e:
@@ -824,6 +877,8 @@ with tabs[2]:
             # ---- 中介模型 ----
             st.markdown("### 中介：A→C→B（路径可正可负）")
             med = cfg.get("mediation", {})
+            if not isinstance(med, dict):
+                med = {}
             A_default = med.get("A", dims[0])
             C_default = med.get("C", dims[min(1, len(dims) - 1)])
             B_default = med.get("B", dims[min(2, len(dims) - 1)])
@@ -848,11 +903,13 @@ with tabs[2]:
             b_default = float(med.get("b", 0.6))
             cprime_default = float(med.get("cprime", 0.2 if med_type == "部分中介" else 0.0))
 
-            a = st.slider("路径 a（A→C，可正可负）", -1.2, 1.2, a_default, 0.05)
-            b_path = st.slider("路径 b（C→B，可正可负）", -1.2, 1.2, b_default, 0.05)
+            a = float(st.slider("路径 a（A→C，可正可负）", -1.2, 1.2, a_default, 0.05))
+            b_path = float(st.slider("路径 b（C→B，可正可负）", -1.2, 1.2, b_default, 0.05))
             cprime = 0.0
             if med_type == "部分中介":
-                cprime = st.slider("直接效应 c'（A→B，可正可负）", -1.2, 1.2, cprime_default, 0.05)
+                cprime = float(
+                    st.slider("直接效应 c'（A→B，可正可负）", -1.2, 1.2, cprime_default, 0.05)
+                )
 
             cfg["mediation"] = {
                 "A": A,
@@ -876,6 +933,8 @@ with tabs[3]:
         st.info("先完成前面三步。")
     else:
         dims_map = cfg.get("dimensions", {})
+        if not isinstance(dims_map, dict):
+            dims_map = {}
         dim_names = list(dims_map.keys())
         if not dim_names:
             st.warning("还没有设置任何维度，请先到第 2 页配置。")
@@ -909,6 +968,8 @@ with tabs[3]:
             if st.button("生成数据", type="primary"):
                 rng = np.random.default_rng(seed)
                 demo = cfg.get("demo", {})
+                if not isinstance(demo, dict):
+                    demo = {}
 
                 # 1) 内部人口学变量（始终生成，用于差异；是否输出列由 use_Q* 决定）
 
@@ -965,6 +1026,8 @@ with tabs[3]:
 
                 # 3) 应用人口学差异 β（在潜变量层面）
                 demo_effects = cfg.get("demo_effects", {})
+                if not isinstance(demo_effects, dict):
+                    demo_effects = {}
                 for d in dim_names:
                     eff = demo_effects.get(d, {})
                     if not isinstance(eff, dict):
@@ -987,8 +1050,8 @@ with tabs[3]:
 
                 # 4) 中介结构
                 med = cfg.get("mediation")
-                if med:
-                    A, C, B = med["A"], med["C"], med["B"]
+                if isinstance(med, dict) and med:
+                    A, C, B = med.get("A"), med.get("C"), med.get("B")
                     if A in Z.columns and C in Z.columns and B in Z.columns:
                         Z = apply_mediation(
                             Z,
@@ -1020,7 +1083,7 @@ with tabs[3]:
                 qid_to_dim = {}
                 for d in dim_names:
                     for qid in dims_map[d]:
-                        qid_to_dim[qid] = d
+                        qid_to_dim[int(qid)] = d
                 rev = set(cfg.get("reverse_items", []))
 
                 item_params = cfg.get("item_params", {})
@@ -1093,6 +1156,8 @@ with tabs[3]:
 
                 dim_mean_cols = [c for c in out.columns if c.endswith("_mean")]
                 demo = cfg.get("demo", {})
+                if not isinstance(demo, dict):
+                    demo = {}
 
                 results = []
 
@@ -1233,6 +1298,8 @@ with tabs[3]:
                 # 值标签
                 value_labels = {}
                 demo = cfg.get("demo", {})
+                if not isinstance(demo, dict):
+                    demo = {}
 
                 if "Q1" in out.columns:
                     value_labels["Q1"] = {1: "男", 2: "女"}

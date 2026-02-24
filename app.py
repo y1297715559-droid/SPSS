@@ -185,6 +185,8 @@ if "questions" not in st.session_state:
     st.session_state.questions = []
 if "config" not in st.session_state:
     st.session_state.config = {}
+if "raw_text" not in st.session_state:
+    st.session_state.raw_text = ""
 
 st.title("问卷解析 + 维度/关系约束 + SPSS数据生成器（本地网页）")
 tabs = st.tabs(
@@ -653,25 +655,52 @@ with tabs[1]:
             "noise": float(item_noise),
         }
 
-        # ------- config JSON 展示 & 导入/导出 -------
+        # ------- config JSON 展示 & 导入/导出（包含前三个 Tab 的所有设置） -------
+
+        # 把当前的问卷文本 + 解析结果 + 配置都打包进一个 dict
+        full_state = {
+            "raw_text": st.session_state.get("raw_text", ""),
+            "questions": st.session_state.get("questions", []),
+            "config": cfg,
+        }
+
         cfg_json = st.text_area(
-            "config.json（可复制保存，下次直接粘贴导入）",
-            value=json.dumps(cfg, ensure_ascii=False, indent=2),
+            "配置保存（包括问卷 + 维度/人口学 + 关系约束）",
+            value=json.dumps(full_state, ensure_ascii=False, indent=2),
             height=220,
         )
+
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("应用上方 JSON", type="primary"):
                 try:
-                    st.session_state.config = json.loads(cfg_json)
-                    st.success("已应用上方 JSON。")
+                    loaded = json.loads(cfg_json)
+
+                    # 兼容老版本：如果是新格式，有 'config' 键
+                    if isinstance(loaded, dict) and "config" in loaded:
+                        st.session_state.config = loaded["config"]
+                        st.session_state.raw_text = loaded.get("raw_text", "")
+                        qs_loaded = loaded.get("questions")
+                        if qs_loaded:
+                            st.session_state.questions = qs_loaded
+                        else:
+                            # 如果没有 questions，就用 raw_text 重新解析
+                            if st.session_state.raw_text:
+                                st.session_state.questions = parse_survey_text(st.session_state.raw_text)
+                    else:
+                        # 旧格式：整个 JSON 就是 config
+                        st.session_state.config = loaded
+
+                    st.success("已应用上方 JSON（包含前三个 Tab 的设置）。")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"JSON 解析失败：{e}")
+
         with col_b:
             st.download_button(
-                "下载 config.json",
-                data=cfg_json.encode("utf-8"),
-                file_name="config.json",
+                "下载配置 JSON（包含问卷 + 配置）",
+                data=json.dumps(full_state, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name="survey_config_full.json",
                 mime="application/json",
             )
 

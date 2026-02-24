@@ -180,6 +180,11 @@ EXECUTE.
 """
 
 
+def _norm_cdf(x: float) -> float:
+    """标准正态分布 CDF 近似，用于算 p 值（避免额外依赖）"""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
 # ---------- session_state 初始化 ----------
 if "questions" not in st.session_state:
     st.session_state.questions = []
@@ -676,7 +681,7 @@ with tabs[1]:
                 try:
                     loaded = json.loads(cfg_json)
 
-                    # 兼容老版本：如果是新格式，有 'config' 键
+                    # 兼容新格式：有 'config' 键
                     if isinstance(loaded, dict) and "config" in loaded:
                         st.session_state.config = loaded["config"]
                         st.session_state.raw_text = loaded.get("raw_text", "")
@@ -1082,6 +1087,124 @@ with tabs[3]:
             if "generated" in st.session_state:
                 out = st.session_state.generated
                 st.dataframe(out.head(50), use_container_width=True)
+
+                # ===== 人口学显著性检查（基于本次模拟数据） =====
+                st.markdown("### 人口学差异显著性（基于本次模拟数据）")
+
+                dim_mean_cols = [c for c in out.columns if c.endswith("_mean")]
+                demo = cfg.get("demo", {})
+
+                results = []
+
+                # 工具函数：二分类 t 检验（正态近似 p）
+                def _ttest_binary(y, g01):
+                    y = np.asarray(y, dtype=float)
+                    g01 = np.asarray(g01, dtype=int)
+                    mask0 = g01 == 0
+                    mask1 = g01 == 1
+                    n0 = mask0.sum()
+                    n1 = mask1.sum()
+                    if n0 < 2 or n1 < 2:
+                        return None, None, None
+                    y0 = y[mask0]
+                    y1 = y[mask1]
+                    m0 = y0.mean()
+                    m1 = y1.mean()
+                    v0 = y0.var(ddof=1)
+                    v1 = y1.var(ddof=1)
+                    # 合并方差
+                    sp2 = ((n0 - 1) * v0 + (n1 - 1) * v1) / (n0 + n1 - 2)
+                    if sp2 <= 0:
+                        return m1 - m0, None, None
+                    t = (m1 - m0) / math.sqrt(sp2 * (1.0 / n0 + 1.0 / n1))
+                    # 大样本用正态近似
+                    p = 2 * (1.0 - _norm_cdf(abs(t)))
+                    return m1 - m0, t, p
+
+                # 工具函数：简单回归 y ~ x，返回斜率及显著性
+                def _reg_slope(y, x):
+                    y = np.asarray(y, dtype=float)
+                    x = np.asarray(x, dtype=float)
+                    n = len(y)
+                    if n < 3:
+                        return None, None, None
+                    x_mean = x.mean()
+                    y_mean = y.mean()
+                    Sxx = ((x - x_mean) ** 2).sum()
+                    if Sxx <= 0:
+                        return None, None, None
+                    Sxy = ((x - x_mean) * (y - y_mean)).sum()
+                    b1 = Sxy / Sxx  # 斜率
+                    # 残差
+                    y_hat = y_mean + b1 * (x - x_mean)
+                    resid = y - y_hat
+                    RSS = (resid ** 2).sum()
+                    s2 = RSS / (n - 2)
+                    if s2 <= 0:
+                        return b1, None, None
+                    se_b1 = math.sqrt(s2 / Sxx)
+                    t = b1 / se_b1
+                    p = 2 * (1.0 - _norm_cdf(abs(t)))
+                    return b1, t, p
+
+                # 遍历每个维度均分
+                for dim_col in dim_mean_cols:
+                    y = out[dim_col].to_numpy()
+
+                    # Q1 性别：1=男,2=女 -> 0/1
+                    if "Q1" in out.columns and demo.get("use_Q1", False):
+                        g = (out["Q1"].to_numpy() == 2).astype(int)  # 女=1
+                        diff, t, p = _ttest_binary(y, g)
+                        if p is not None:
+                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                            results.append([dim_col, "性别(女 vs 男)", diff, t, p, sig])
+
+                    # Q2 年级：1..k -> 回归（年级越高越大）
+                    if "Q2" in out.columns and demo.get("use_Q2", False):
+                        x = out["Q2"].to_numpy().astype(float)  # 1,2,3,4...
+                        b1, t, p = _reg_slope(y, x)
+                        if p is not None:
+                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                            results.append([dim_col, "年级(高年级更高为正)", b1, t, p, sig])
+
+                    # Q3 生源地：1=城镇,2=农村
+                    if "Q3" in out.columns and demo.get("use_Q3", False):
+                        g = (out["Q3"].to_numpy() == 2).astype(int)  # 农村=1
+                        diff, t, p = _ttest_binary(y, g)
+                        if p is not None:
+                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                            results.append([dim_col, "生源地(农村 vs 城镇)", diff, t, p, sig])
+
+                    # Q4 班干部：1=是,2=否
+                    if "Q4" in out.columns and demo.get("use_Q4", False):
+                        g = (out["Q4"].to_numpy() == 1).astype(int)  # 班干部=1
+                        diff, t, p = _ttest_binary(y, g)
+                        if p is not None:
+                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                            results.append([dim_col, "班干部(是 vs 否)", diff, t, p, sig])
+
+                    # Q5 独生：1=独生,2=非独生
+                    if "Q5" in out.columns and demo.get("use_Q5", False):
+                        g = (out["Q5"].to_numpy() == 1).astype(int)  # 独生=1
+                        diff, t, p = _ttest_binary(y, g)
+                        if p is not None:
+                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                            results.append([dim_col, "独生(独生 vs 非独生)", diff, t, p, sig])
+
+                if results:
+                    df_sig = pd.DataFrame(
+                        results,
+                        columns=["维度均分变量", "人口学变量", "差异/斜率(高-低)", "t值", "p(正态近似)", "显著性"]
+                    )
+                    # 保留三位小数
+                    df_sig["差异/斜率(高-低)"] = df_sig["差异/斜率(高-低)"].round(3)
+                    df_sig["t值"] = df_sig["t值"].round(3)
+                    df_sig["p(正态近似)"] = df_sig["p(正态近似)"].round(4)
+
+                    st.dataframe(df_sig, use_container_width=True)
+                    st.caption("显著性说明：*** p<.001，** p<.01，* p<.05，ns 不显著（基于正态近似）。")
+                else:
+                    st.info("当前没有可检验的人口学变量或维度均分列。")
 
                 # 变量标签
                 var_labels = {"ID": "Respondent ID"}

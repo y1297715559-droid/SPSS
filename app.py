@@ -1309,4 +1309,4 @@ with tabs[3]:
                         except Exception:
                             pass
                 else:
-                    st.info("未安装 pyreadstat：可以用 CSV + .sps 在 SPSS 中导入，效果相同。") 我用这串代码跑出来的线性关系 在大维度上显著，小维度上不显著为什么
+                    st.info("未安装 pyreadstat：可以用 CSV + .sps 在 SPSS 中导入，效果相同。")

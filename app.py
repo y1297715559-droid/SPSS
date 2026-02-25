@@ -420,4 +420,5 @@ with tabs[1]:
                             if q_val in qids_big:
                                 qid_list_tmp.append(q_val)
                     if qid_list_tmp:
-                        sub_dict[sub_name] = sorted
+                        sub_dict[sub_name] = sorted(set(qid_list_tmp))
+                new

@@ -1000,6 +1000,21 @@ with tabs[3]:
                             + b_only * only01
                         )
                         Z[d] = Z[d] + delta
+                        subdims_all = cfg.get("subdimensions", {})
+if isinstance(subdims_all, dict):
+    for big_dim, subdict in subdims_all.items():
+        if not isinstance(subdict, dict):
+            continue
+        for sub_name, qids in subdict.items():
+            if not qids:
+                continue
+            qcols = [f"Q{qid}" for qid in qids if f"Q{qid}" in out.columns]
+            if not qcols:
+                continue
+            safe_sub = re.sub(r"\W+", "", sub_name)
+            col_name = f"{big_dim}_{safe_sub}_mean"
+            # 强化小维度和大维度之间的线性关系
+            Z[col_name] = Z[big_dim] * 0.8 + np.random.normal(0, 0.2, size=N) 
 
                 # 5) 构造输出数据框
                 out = pd.DataFrame({"ID": np.arange(1, N + 1)})

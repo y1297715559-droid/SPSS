@@ -792,7 +792,7 @@ with tabs[3]:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
 
-subdims_all = cfg.get("subdimensions", {})
+                subdims_all = cfg.get("subdimensions", {})
                 if isinstance(subdims_all, dict):
                     for big_dim, subdict in subdims_all.items():
                         if not isinstance(subdict, dict):

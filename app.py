@@ -898,6 +898,50 @@ with tabs[3]:
                             if delta_sub is not None:
                                 out[col_name] = out[col_name] + delta_sub
                             cols.append(col_name)
+                                if med:
+                    A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
+                    a_val = float(med.get("a", 0.6))
+                    b_val = float(med.get("b", 0.6))
+                    cprime_val = float(med.get("cprime", 0.1))
+                    col_a = f"{A_med}_mean"
+                    col_c = f"{C_med}_mean"
+                    col_b = f"{B_med}_mean"
+                    if all(c in out.columns for c in [col_a, col_c, col_b]):
+                        # 取A均分，标准化
+                        a_arr = out[col_a].to_numpy().astype(float)
+                        a_std = (a_arr - a_arr.mean()) / (a_arr.std() + 1e-8)
+
+                        # --- 修正C：正交分解后精确重组 ---
+                        c_arr = out[col_c].to_numpy().astype(float)
+                        # C中与A正交的部分（保留C自身人口学）
+                        c_on_a = np.dot(c_arr, a_std) / (np.dot(a_std, a_std) + 1e-8)
+                        c_perp = c_arr - c_on_a * a_std
+                        c_perp = (c_perp - c_perp.mean()) / (c_perp.std() + 1e-8)
+                        # 目标相关0.35，R²≈12%
+                        target_ac = float(np.sign(a_val)) * 0.35
+                        c_new_std = (target_ac * a_std
+                                     + math.sqrt(max(1 - target_ac**2, 1e-6)) * c_perp)
+                        # 还原到原始C的均值和标准差
+                        c_new = (c_new_std * c_arr.std() + c_arr.mean())
+                        out[col_c] = c_new
+                        c_new_std2 = (c_new - c_new.mean()) / (c_new.std() + 1e-8)
+
+                        # --- 修正B：提取B残差，重组保证A→B显著 ---
+                        b_arr = out[col_b].to_numpy().astype(float)
+                        # B中独立于A和C的残差（含B自身人口学）
+                        X_ac = np.column_stack([a_std, c_new_std2, np.ones(N)])
+                        beta_b, _, _, _ = np.linalg.lstsq(X_ac, b_arr, rcond=None)
+                        b_resid = b_arr - X_ac @ beta_b
+                        b_resid = (b_resid - b_resid.mean()) / (b_resid.std() + 1e-8)
+                        # 重组：A直接效应+C间接效应+残差
+                        cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.20)
+                        b_use = float(np.sign(b_val)) * max(abs(b_val), 0.25)
+                        var_used = max(0.0, min(
+                            cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.85))
+                        b_new_std = (cp_use * a_std + b_use * c_new_std2
+                                     + math.sqrt(1 - var_used) * b_resid)
+                        # 还原到原始B的均值和标准差
+                        out[col_b] = b_new_std * b_arr.std() + b_arr.mean()
                 out = out[cols]
                 # ✅ 存入 session_state
                 st.session_state.generated = out

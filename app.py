@@ -730,6 +730,7 @@ with tabs[3]:
                         Z[d] = Z[d] + delta
 
                 # ✅ 终极修正：直接在均分列上强制控制A-C和A-B相关
+                # 注意：必须在均分计算后、out=out[cols]之前执行
                 if med:
                     A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
                     a_val = float(med.get("a", 0.6))
@@ -738,13 +739,10 @@ with tabs[3]:
                     col_a = f"{A_med}_mean"
                     col_c = f"{C_med}_mean"
                     col_b = f"{B_med}_mean"
-                    if all(c in out.columns for c in [col_a, col_c, col_b]):
+                    if col_a in out.columns and col_c in out.columns and col_b in out.columns:
                         a_arr = out[col_a].to_numpy().astype(float)
                         a_std = (a_arr - a_arr.mean()) / (a_arr.std() + 1e-8)
-
-                        # 目标A-C相关0.50（R²≈25%，显著且合理）
                         target_ac = float(np.sign(a_val)) * 0.50
-
                         c_arr = out[col_c].to_numpy().astype(float)
                         c_on_a = np.dot(c_arr, a_std) / (np.dot(a_std, a_std) + 1e-8)
                         c_perp = c_arr - c_on_a * a_std
@@ -754,9 +752,8 @@ with tabs[3]:
                         c_new = c_new_std * c_arr.std() + c_arr.mean()
                         out[col_c] = c_new
                         c_new_std2 = (c_new - c_new.mean()) / (c_new.std() + 1e-8)
-
                         b_arr = out[col_b].to_numpy().astype(float)
-                        X_ac = np.column_stack([a_std, c_new_std2, np.ones(N)])
+                        X_ac = np.column_stack([a_std, c_new_std2, np.ones(len(a_std))])
                         beta_b, _, _, _ = np.linalg.lstsq(X_ac, b_arr, rcond=None)
                         b_resid = b_arr - X_ac @ beta_b
                         b_resid = (b_resid - b_resid.mean()) / (b_resid.std() + 1e-8)
@@ -767,25 +764,26 @@ with tabs[3]:
                         b_new_std = (cp_use * a_std + b_use * c_new_std2
                                      + math.sqrt(1 - var_used) * b_resid)
                         out[col_b] = b_new_std * b_arr.std() + b_arr.mean()
-
-                        # 同步修正小维度均分（C和B的小维度）
-                        for big_dim_fix, col_fix_orig, new_std_fix in [
-                            (C_med, col_c, c_new_std2),
-                            (B_med, col_b, (b_new_std - b_new_std.mean()) / (b_new_std.std() + 1e-8))
+                        b_new_std2 = (b_new_std - b_new_std.mean()) / (b_new_std.std() + 1e-8)
+                        for big_dim_fix, new_std_fix in [
+                            (C_med, c_new_std2),
+                            (B_med, b_new_std2)
                         ]:
                             subdims_fix = cfg.get("subdimensions", {}).get(big_dim_fix, {})
-                            orig_arr = out[col_fix_orig].to_numpy().astype(float)
                             for sub_name_fix in subdims_fix:
                                 safe_fix = re.sub(r"\W+", "", sub_name_fix)
                                 sub_col = f"{big_dim_fix}_{safe_fix}_mean"
                                 if sub_col in out.columns:
                                     sub_arr = out[sub_col].to_numpy().astype(float)
-                                    # 保留小维度独立方差，叠加修正后的父维度信号
-                                    sub_on_parent = np.dot(sub_arr, new_std_fix) / (np.dot(new_std_fix, new_std_fix) + 1e-8)
-                                    sub_perp = sub_arr - sub_on_parent * new_std_fix
+                                    sub_on_p = np.dot(sub_arr, new_std_fix) / (np.dot(new_std_fix, new_std_fix) + 1e-8)
+                                    sub_perp = sub_arr - sub_on_p * new_std_fix
                                     sub_perp = (sub_perp - sub_perp.mean()) / (sub_perp.std() + 1e-8)
                                     sub_new = 0.60 * new_std_fix + 0.40 * sub_perp
                                     out[sub_col] = sub_new * sub_arr.std() + sub_arr.mean()
+
+                out = out[cols]
+                st.session_state.generated = out
+                st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
                 # 5) 输出 DataFrame
                 out = pd.DataFrame({"ID": np.arange(1, N + 1)})
                 if demo.get("use_Q1", False):

@@ -941,6 +941,18 @@ with tabs[3]:
                 out = out[cols]
                 st.session_state.generated = out
                 st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
+
+            # ✅ 在按钮块外展示结果
+            if "generated" in st.session_state:
+                out = st.session_state.generated
+                cfg = st.session_state.config
+                demo = cfg.get("demo", {})
+
+                st.dataframe(out.head(50), use_container_width=True)
+
+                st.markdown("### 人口学差异显著性（基于本次模拟数据）")
+                dim_mean_cols = [c for c in out.columns if c.endswith("_mean")]
+
                 def _reg_slope(y, x):
                     y = np.asarray(y, dtype=float)
                     x = np.asarray(x, dtype=float)
@@ -993,7 +1005,6 @@ with tabs[3]:
                         if p is not None:
                             sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
                             results.append([dim_col, "独生(独生 vs 非独生)", diff, t, p, sig])
-
                 if results:
                     df_sig = pd.DataFrame(
                         results,

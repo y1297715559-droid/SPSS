@@ -750,20 +750,20 @@ with tabs[3]:
 def generate_data():
     out = pd.DataFrame({"ID": np.arange(1, N + 1)})
     # 进一步处理数据
-    return out
 
-# 生成数据后
-                # 人口学变量按启用情况生成列
-                if demo.get("use_Q1", False):
-                    out["Q1"] = gender_cat  # 1=男 2=女
-                if demo.get("use_Q2", False):
-                    out["Q2"] = grade_cat
-                if demo.get("use_Q3", False):
-                    out["Q3"] = origin_cat
-                if demo.get("use_Q4", False):
-                    out["Q4"] = cadre_cat
-                if demo.get("use_Q5", False):
-                    out["Q5"] = only_cat
+    # 人口学变量按启用情况生成列
+    if demo.get("use_Q1", False):
+        out["Q1"] = gender_cat  # 1=男 2=女
+    if demo.get("use_Q2", False):
+        out["Q2"] = grade_cat
+    if demo.get("use_Q3", False):
+        out["Q3"] = origin_cat
+    if demo.get("use_Q4", False):
+        out["Q4"] = cadre_cat
+    if demo.get("use_Q5", False):
+        out["Q5"] = only_cat
+
+    return out
 
                 # 6) 潜变量 → 题目分数（只对 qid >= scale_start_qid 的题目生成 1~5）
                 qid_to_dim = {}

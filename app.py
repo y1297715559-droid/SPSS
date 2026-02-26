@@ -1016,9 +1016,11 @@ if isinstance(subdims_all, dict):
             # 强化小维度和大维度之间的线性关系
             Z[col_name] = Z[big_dim] * 0.8 + np.random.normal(0, 0.2, size=N) 
 
-                # 5) 构造输出数据框
-                def generate_data():
-                out = pd.DataFrame({"ID": np.arange(1, N + 1)})
+# 5) 构造输出数据框：调整 generate_data 函数的缩进
+def generate_data():
+    out = pd.DataFrame({"ID": np.arange(1, N + 1)})
+    # 进一步处理数据
+    return out
 
                 # 人口学变量按启用情况生成列
                 if demo.get("use_Q1", False):

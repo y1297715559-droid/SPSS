@@ -729,7 +729,7 @@ with tabs[3]:
                                  + b_origin * origin01 + b_cadre * cadre01 + b_only * only01)
                         Z[d] = Z[d] + delta
 
-                # ✅ 终极修正：精确控制A-C相关，同时保留C和B的人口学显著性
+                # ✅ 终极修正：正交分解重组C和B，精确控制观测相关
                 if med:
                     A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
                     a_val = float(med.get("a", 0.6))
@@ -739,58 +739,39 @@ with tabs[3]:
                             and A_med != C_med and A_med != B_med):
                         rng_fix = np.random.default_rng(seed + 999)
 
-                        # 取最终A（含人口学）标准化
-                        za_final = Z[A_med].to_numpy().astype(float)
-                        za_std = (za_final - za_final.mean()) / (za_final.std() + 1e-8)
+                        # 最终A（已含人口学），标准化
+                        za = Z[A_med].to_numpy().astype(float)
+                        za_std = (za - za.mean()) / (za.std() + 1e-8)
 
-                        # 计算C和B各自的人口学delta
-                        eff_c = demo_effects.get(C_med, {})
-                        delta_c = (float(eff_c.get("gender", 0) or 0) * gender01
-                                   + float(eff_c.get("grade", 0) or 0) * grade_num
-                                   + float(eff_c.get("origin", 0) or 0) * origin01
-                                   + float(eff_c.get("cadre", 0) or 0) * cadre01
-                                   + float(eff_c.get("only", 0) or 0) * only01)
-                        eff_b = demo_effects.get(B_med, {})
-                        delta_b = (float(eff_b.get("gender", 0) or 0) * gender01
-                                   + float(eff_b.get("grade", 0) or 0) * grade_num
-                                   + float(eff_b.get("origin", 0) or 0) * origin01
-                                   + float(eff_b.get("cadre", 0) or 0) * cadre01
-                                   + float(eff_b.get("only", 0) or 0) * only01)
+                        # 最终C（已含人口学）
+                        # 分解为：与A平行的成分 + 与A正交的成分
+                        zc = Z[C_med].to_numpy().astype(float)
+                        c_on_a_coef = np.dot(zc, za_std) / (np.dot(za_std, za_std) + 1e-8)
+                        c_perp = zc - c_on_a_coef * za_std
+                        c_perp_std = (c_perp - c_perp.mean()) / (c_perp.std() + 1e-8)
 
-                        delta_c = np.asarray(delta_c, dtype=float)
-                        delta_b = np.asarray(delta_b, dtype=float)
-
-                        # 正交化delta_c：去掉与za_std相关的部分，只保留独立成分
-                        proj_c = np.dot(delta_c, za_std) / (np.dot(za_std, za_std) + 1e-8)
-                        delta_c_orth = delta_c - proj_c * za_std
-
-                        proj_b = np.dot(delta_b, za_std) / (np.dot(za_std, za_std) + 1e-8)
-                        delta_b_orth = delta_b - proj_b * za_std
-
-                        # 精确控制A-C结构相关 = target_ac
+                        # 精确控制：corr(A, C) = target_ac（数学上严格成立）
                         target_ac = float(np.sign(a_val)) * 0.35
-                        e_c = rng_fix.standard_normal(N)
-                        e_c = (e_c - e_c.mean()) / (e_c.std() + 1e-8)
-                        zc_struct = (target_ac * za_std
-                                     + math.sqrt(max(1 - target_ac ** 2, 1e-6)) * e_c)
-
-                        # 叠加正交化的人口学效应到C
-                        zc_new = zc_struct + delta_c_orth
+                        zc_new = (target_ac * za_std
+                                  + math.sqrt(max(1 - target_ac ** 2, 1e-6)) * c_perp_std)
                         Z[C_med] = pd.Series(zc_new, index=Z.index)
+                        zc_new_std = (zc_new - zc_new.mean()) / (zc_new.std() + 1e-8)
 
-                        # 重建B结构部分
+                        # 最终B（已含人口学）
+                        # 提取B中独立于A和C的残差成分（含B自身人口学）
+                        zb = Z[B_med].to_numpy().astype(float)
+                        X_ac = np.column_stack([za_std, zc_new_std, np.ones(N)])
+                        beta_b, _, _, _ = np.linalg.lstsq(X_ac, zb, rcond=None)
+                        b_resid = zb - X_ac @ beta_b
+                        b_resid_std = (b_resid - b_resid.mean()) / (b_resid.std() + 1e-8)
+
+                        # 重组B：A直接效应 + C间接效应 + B独立成分
                         cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.20)
                         b_use = float(np.sign(b_val)) * max(abs(b_val), 0.25)
-                        zc_std = (zc_struct - zc_struct.mean()) / (zc_struct.std() + 1e-8)
-                        e_b = rng_fix.standard_normal(N)
-                        e_b = (e_b - e_b.mean()) / (e_b.std() + 1e-8)
                         var_used = max(0.0, min(
-                            cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.88))
-                        zb_struct = (cp_use * za_std + b_use * zc_std
-                                     + math.sqrt(1 - var_used) * e_b)
-
-                        # 叠加正交化的人口学效应到B
-                        zb_new = zb_struct + delta_b_orth
+                            cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.85))
+                        zb_new = (cp_use * za_std + b_use * zc_new_std
+                                  + math.sqrt(1 - var_used) * b_resid_std)
                         Z[B_med] = pd.Series(zb_new, index=Z.index)
                 # 5) 输出 DataFrame
                 out = pd.DataFrame({"ID": np.arange(1, N + 1)})

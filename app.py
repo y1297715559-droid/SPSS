@@ -243,37 +243,9 @@ with tabs[1]:
         all_qids = sorted([q["qid"] for q in qs])
         min_qid = min(all_qids)
         max_qid = max(all_qids)
-
-        # 显示配置的 JSON 数据
-        st.markdown("### 配置 JSON 数据")
-        # 格式化 config 为 JSON 字符串
-        config_json = json.dumps(st.session_state.config, indent=2, ensure_ascii=False)
-        # 让用户编辑 JSON
-        edited_config_json = st.text_area("编辑 JSON 配置", config_json, height=400)
-
-        # 更新配置（确保输入的是合法的 JSON 格式）
-        try:
-            if edited_config_json != config_json:
-                st.session_state.config = json.loads(edited_config_json)  # 保存更新的 JSON
-                st.success("配置已更新！")
-        except json.JSONDecodeError as e:
-            st.error(f"无效的 JSON 格式：{e}")
-
-        # ----------- 应用修改后的配置 ---------------
-        if st.button("应用配置", type="primary"):
-            # 在这里你可以应用 `st.session_state.config` 里的配置
-            cfg = st.session_state.config
-
-            # 应用到后续操作，如维度、反向题设置等
-            # 示例：更新配置中的人口学差异
-            demo_effects = cfg.get("demo_effects", {})
-            if demo_effects:
-                st.write("当前人口学差异设置：")
-                st.write(demo_effects)
-
-        # 初始化默认 config
+        
+        # 初始化默认 config（如果不存在）
         if not st.session_state.config:
-            # 默认起始题号：如果有第 6 题，就从 6；否则从最小题号
             default_start = 6 if any(q >= 6 for q in all_qids) else min_qid
             st.session_state.config = {
                 "N": 630,
@@ -283,15 +255,14 @@ with tabs[1]:
                 "dimensions": {
                     "A_dim": [q for q in all_qids if default_start <= q < default_start + 10],
                 },
-                # 小维度（按大维度划分），默认空
                 "subdimensions": {},
                 "demo": {
                     # 是否启用
-                    "use_Q1": False,
-                    "use_Q2": False,
-                    "use_Q3": False,
-                    "use_Q4": False,
-                    "use_Q5": False,
+                    "use_Q1": True,
+                    "use_Q2": True,
+                    "use_Q3": True,
+                    "use_Q4": True,
+                    "use_Q5": True,
                     # 百分比设置
                     "Q1_perc": [50.0, 50.0],  # 男, 女
                     "grade_levels": 3,
@@ -305,7 +276,6 @@ with tabs[1]:
                     "loading": 0.80,
                     "noise": 0.75,
                 },
-                # 默认相关矩阵先留空，在 Tab3 按当前维度数量初始化
                 "corr_matrix": None,
                 "mediation": {
                     "A": "A_dim",
@@ -316,7 +286,6 @@ with tabs[1]:
                     "cprime": 0.2,
                     "type": "部分中介",
                 },
-                # 每个维度上的人口学差异 β
                 "demo_effects": {
                     "A_dim": {
                         "gender": 0.6,
@@ -327,40 +296,40 @@ with tabs[1]:
                     },
                 },
             }
+        
         cfg = st.session_state.config
-
+        
         # 样本量 & seed
         c1, c2 = st.columns([1, 1])
         with c1:
             cfg["N"] = st.number_input("样本量 N", 30, 5000, int(cfg.get("N", 630)), 10)
         with c2:
             cfg["seed"] = st.number_input("随机种子 seed", 0, 10000, int(cfg.get("seed", 42)), 1)
-
-        # 量表维度起始题号（你可以自选从第几题开始）
+        
+        # 量表维度起始题号
         default_start_qid = int(cfg.get("scale_start_qid", 6))
         if default_start_qid < min_qid:
             default_start_qid = min_qid
         if default_start_qid > max_qid:
             default_start_qid = max_qid
         scale_start_qid = st.number_input(
-            "量表维度起始题号（从这道题开始，后面的题才用于维度和 1~5 计分）",
+            "量表维度起始题号",
             min_value=min_qid,
             max_value=max_qid,
             value=default_start_qid,
             step=1,
         )
         cfg["scale_start_qid"] = int(scale_start_qid)
-
+        
         # 可作为维度题的题号
         scale_qids = [qid for qid in all_qids if qid >= cfg["scale_start_qid"]]
-
-        # ------- 维度设置：多选题号 + 增删 -------
-        st.markdown("### 大维度设置（大维度 = 若干题目的集合）")
-        st.caption("每个维度下，直接多选题号；想删就点“删除本维度”，想加就点“➕ 新增维度”。")
-
+        
+        # ------- 维度设置 -------
+        st.markdown("### 大维度设置")
+        
         dims_dict = cfg.get("dimensions", {})
         dims_items = list(dims_dict.items())
-
+        
         # 新增维度
         if st.button("➕ 新增维度"):
             base_name = "新维度"
@@ -374,7 +343,7 @@ with tabs[1]:
             cfg["dimensions"] = dims_dict
             st.session_state.config = cfg
             st.rerun()
-
+        
         delete_keys = []
         for i, (orig_name, qid_list) in enumerate(dims_items):
             with st.expander(f"维度 {i+1}：{orig_name}", expanded=True):
@@ -388,7 +357,7 @@ with tabs[1]:
                 )
                 if st.button("删除本维度", key=f"dim_del_{i}"):
                     delete_keys.append(orig_name)
-
+        
         if delete_keys:
             for k in delete_keys:
                 if k in dims_dict:
@@ -397,7 +366,7 @@ with tabs[1]:
             st.session_state.config = cfg
             st.rerun()
         else:
-            # 修复“新增维度有时加不上”的问题：只要有名字就保留，题目可以暂时为空
+            # 更新维度名称和题目
             new_dims = {}
             for i, (orig_name, qid_list) in enumerate(dims_items):
                 name = st.session_state.get(f"dim_name_{i}", "").strip() or orig_name
@@ -407,12 +376,7 @@ with tabs[1]:
                 if name:
                     new_dims[name] = sorted(set(items))
             cfg["dimensions"] = new_dims
-
-        if not cfg["dimensions"]:
-            st.warning("当前还没有任何维度，请点击“➕ 新增维度”创建。")
-        else:
-            st.success(f"当前共有 {len(cfg['dimensions'])} 个大维度。")
-
+        
         # ------- 小维度设置 -------
         st.markdown("### 小维度设置（可选，大维度内部再分）")
         st.caption(
@@ -475,14 +439,175 @@ with tabs[1]:
                     st.info("当前未设置小维度。")
 
         cfg["subdimensions"] = new_subdims_all
-
-        # ------- 反向题 -------
+        
+        # ------- 人口学变量设置 -------
+        st.markdown("### 人口学变量设置")
+        
+        demo = cfg.get("demo", {})
+        
+        # 启用开关
+        st.markdown("**启用以下人口学变量：**")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            demo["use_Q1"] = st.checkbox("性别", value=demo.get("use_Q1", True))
+        with col2:
+            demo["use_Q2"] = st.checkbox("年级", value=demo.get("use_Q2", True))
+        with col3:
+            demo["use_Q3"] = st.checkbox("生源地", value=demo.get("use_Q3", True))
+        with col4:
+            demo["use_Q4"] = st.checkbox("班干部", value=demo.get("use_Q4", True))
+        with col5:
+            demo["use_Q5"] = st.checkbox("独生子女", value=demo.get("use_Q5", True))
+        
+        # 百分比设置
+        st.markdown("**百分比设置：**")
+        
+        if demo.get("use_Q1", True):
+            st.markdown("**性别比例（男/女）**")
+            col1, col2 = st.columns(2)
+            with col1:
+                male_perc = st.number_input("男性比例(%)", 0.0, 100.0, 
+                                          demo.get("Q1_perc", [50.0, 50.0])[0], 1.0,
+                                          key="male_perc")
+            with col2:
+                female_perc = 100.0 - male_perc
+                st.metric("女性比例(%)", f"{female_perc:.1f}")
+            demo["Q1_perc"] = [male_perc, female_perc]
+        
+        if demo.get("use_Q2", True):
+            st.markdown("**年级分布**")
+            grade_levels = st.selectbox("年级数量", [3, 4], 
+                                      index=0 if demo.get("grade_levels", 3) == 3 else 1,
+                                      key="grade_levels")
+            demo["grade_levels"] = grade_levels
+            
+            if grade_levels == 3:
+                default_perc = demo.get("Q2_perc", [35.0, 40.0, 25.0])
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    perc1 = st.number_input("大一比例(%)", 0.0, 100.0, default_perc[0], 1.0, key="grade1")
+                with col2:
+                    perc2 = st.number_input("大二比例(%)", 0.0, 100.0, default_perc[1], 1.0, key="grade2")
+                with col3:
+                    perc3 = 100.0 - perc1 - perc2
+                    st.metric("大三比例(%)", f"{perc3:.1f}")
+                demo["Q2_perc"] = [perc1, perc2, perc3]
+            else:
+                default_perc = demo.get("Q2_perc", [25.0, 30.0, 25.0, 20.0])
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    perc1 = st.number_input("大一比例(%)", 0.0, 100.0, default_perc[0], 1.0, key="grade1_4")
+                with col2:
+                    perc2 = st.number_input("大二比例(%)", 0.0, 100.0, default_perc[1], 1.0, key="grade2_4")
+                with col3:
+                    perc3 = st.number_input("大三比例(%)", 0.0, 100.0, default_perc[2], 1.0, key="grade3_4")
+                with col4:
+                    perc4 = 100.0 - perc1 - perc2 - perc3
+                    st.metric("大四比例(%)", f"{perc4:.1f}")
+                demo["Q2_perc"] = [perc1, perc2, perc3, perc4]
+        
+        if demo.get("use_Q3", True):
+            st.markdown("**生源地比例（城镇/农村）**")
+            col1, col2 = st.columns(2)
+            with col1:
+                urban_perc = st.number_input("城镇比例(%)", 0.0, 100.0,
+                                           demo.get("Q3_perc", [55.0, 45.0])[0], 1.0,
+                                           key="urban_perc")
+            with col2:
+                rural_perc = 100.0 - urban_perc
+                st.metric("农村比例(%)", f"{rural_perc:.1f}")
+            demo["Q3_perc"] = [urban_perc, rural_perc]
+        
+        if demo.get("use_Q4", True):
+            st.markdown("**班干部比例（是/否）**")
+            col1, col2 = st.columns(2)
+            with col1:
+                cadre_perc = st.number_input("班干部比例(%)", 0.0, 100.0,
+                                           demo.get("Q4_perc", [28.0, 72.0])[0], 1.0,
+                                           key="cadre_perc")
+            with col2:
+                non_cadre_perc = 100.0 - cadre_perc
+                st.metric("非班干部比例(%)", f"{non_cadre_perc:.1f}")
+            demo["Q4_perc"] = [cadre_perc, non_cadre_perc]
+        
+        if demo.get("use_Q5", True):
+            st.markdown("**独生子女比例（独生/非独生）**")
+            col1, col2 = st.columns(2)
+            with col1:
+                only_perc = st.number_input("独生子女比例(%)", 0.0, 100.0,
+                                          demo.get("Q5_perc", [38.0, 62.0])[0], 1.0,
+                                          key="only_perc")
+            with col2:
+                non_only_perc = 100.0 - only_perc
+                st.metric("非独生子女比例(%)", f"{non_only_perc:.1f}")
+            demo["Q5_perc"] = [only_perc, non_only_perc]
+        
+        cfg["demo"] = demo
+        
+        # ------- 题目参数设置 -------
+        st.markdown("### 题目参数设置")
+        
+        item_params = cfg.get("item_params", {})
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            item_params["mean"] = st.number_input("题目均值", 1.0, 5.0, 
+                                                float(item_params.get("mean", 3.6)), 0.1)
+        with col2:
+            item_params["loading"] = st.number_input("因子载荷", 0.1, 1.0,
+                                                   float(item_params.get("loading", 0.8)), 0.05)
+        with col3:
+            item_params["noise"] = st.number_input("噪声水平", 0.1, 2.0,
+                                                 float(item_params.get("noise", 0.75)), 0.05)
+        cfg["item_params"] = item_params
+        
+        # ------- 反向题设置 -------
         rev_txt = st.text_input(
             "反向题题号（逗号分隔）",
             value=",".join(map(str, cfg.get("reverse_items", []))) if cfg.get("reverse_items") else "",
             help="例如：8,12,15 表示这些题目在 1~5 上按 1↔5 反向计分。",
         )
         cfg["reverse_items"] = [int(x.strip()) for x in rev_txt.split(",") if x.strip().isdigit()]
+        
+        # ------- 保存配置按钮 -------
+        if st.button("保存当前配置", type="primary"):
+            st.session_state.config = cfg
+            st.success("配置已保存！")
+        
+        # ------- JSON 配置编辑器（放在最下方） -------
+        st.markdown("---")
+        st.markdown("### JSON 配置编辑器")
+        st.caption("高级用户可以直接编辑 JSON 配置，或复制配置用于备份")
+        
+        # 显示当前配置的 JSON
+        config_json = json.dumps(st.session_state.config, indent=2, ensure_ascii=False)
+        
+        # 让用户编辑 JSON
+        edited_config_json = st.text_area(
+            "编辑 JSON 配置", 
+            config_json, 
+            height=400,
+            key="json_editor"
+        )
+        
+        # 应用 JSON 编辑的按钮
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("应用 JSON 配置", use_container_width=True):
+                try:
+                    if edited_config_json != config_json:
+                        new_config = json.loads(edited_config_json)
+                        st.session_state.config = new_config
+                        st.success("JSON 配置已应用！")
+                        st.rerun()
+                except json.JSONDecodeError as e:
+                    st.error(f"无效的 JSON 格式：{e}")
+                except Exception as e:
+                    st.error(f"应用配置时出错：{e}")
+        
+        with col2:
+            # 导出配置按钮
+            if st.button("导出配置为 JSON 文件", use_container_width=True):
+                st
 # ---------- Tab 3: 关系约束 ----------
 with tabs[2]:
     st.subheader("关系约束：各人口学差异・维度相关矩阵・中介模型")

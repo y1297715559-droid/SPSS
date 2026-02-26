@@ -729,50 +729,63 @@ with tabs[3]:
                                  + b_origin * origin01 + b_cadre * cadre01 + b_only * only01)
                         Z[d] = Z[d] + delta
 
-                # ✅ 终极修正：正交分解重组C和B，精确控制观测相关
+                # ✅ 终极修正：直接在均分列上强制控制A-C和A-B相关
                 if med:
                     A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
                     a_val = float(med.get("a", 0.6))
                     b_val = float(med.get("b", 0.6))
                     cprime_val = float(med.get("cprime", 0.1))
-                    if (A_med in Z.columns and C_med in Z.columns and B_med in Z.columns
-                            and A_med != C_med and A_med != B_med):
-                        rng_fix = np.random.default_rng(seed + 999)
+                    col_a = f"{A_med}_mean"
+                    col_c = f"{C_med}_mean"
+                    col_b = f"{B_med}_mean"
+                    if all(c in out.columns for c in [col_a, col_c, col_b]):
+                        a_arr = out[col_a].to_numpy().astype(float)
+                        a_std = (a_arr - a_arr.mean()) / (a_arr.std() + 1e-8)
 
-                        # 最终A（已含人口学），标准化
-                        za = Z[A_med].to_numpy().astype(float)
-                        za_std = (za - za.mean()) / (za.std() + 1e-8)
+                        # 目标A-C相关0.50（R²≈25%，显著且合理）
+                        target_ac = float(np.sign(a_val)) * 0.50
 
-                        # 最终C（已含人口学）
-                        # 分解为：与A平行的成分 + 与A正交的成分
-                        zc = Z[C_med].to_numpy().astype(float)
-                        c_on_a_coef = np.dot(zc, za_std) / (np.dot(za_std, za_std) + 1e-8)
-                        c_perp = zc - c_on_a_coef * za_std
-                        c_perp_std = (c_perp - c_perp.mean()) / (c_perp.std() + 1e-8)
+                        c_arr = out[col_c].to_numpy().astype(float)
+                        c_on_a = np.dot(c_arr, a_std) / (np.dot(a_std, a_std) + 1e-8)
+                        c_perp = c_arr - c_on_a * a_std
+                        c_perp = (c_perp - c_perp.mean()) / (c_perp.std() + 1e-8)
+                        c_new_std = (target_ac * a_std
+                                     + math.sqrt(max(1 - target_ac**2, 1e-6)) * c_perp)
+                        c_new = c_new_std * c_arr.std() + c_arr.mean()
+                        out[col_c] = c_new
+                        c_new_std2 = (c_new - c_new.mean()) / (c_new.std() + 1e-8)
 
-                        # 精确控制：corr(A, C) = target_ac（数学上严格成立）
-                        target_ac = float(np.sign(a_val)) * 0.35
-                        zc_new = (target_ac * za_std
-                                  + math.sqrt(max(1 - target_ac ** 2, 1e-6)) * c_perp_std)
-                        Z[C_med] = pd.Series(zc_new, index=Z.index)
-                        zc_new_std = (zc_new - zc_new.mean()) / (zc_new.std() + 1e-8)
-
-                        # 最终B（已含人口学）
-                        # 提取B中独立于A和C的残差成分（含B自身人口学）
-                        zb = Z[B_med].to_numpy().astype(float)
-                        X_ac = np.column_stack([za_std, zc_new_std, np.ones(N)])
-                        beta_b, _, _, _ = np.linalg.lstsq(X_ac, zb, rcond=None)
-                        b_resid = zb - X_ac @ beta_b
-                        b_resid_std = (b_resid - b_resid.mean()) / (b_resid.std() + 1e-8)
-
-                        # 重组B：A直接效应 + C间接效应 + B独立成分
-                        cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.20)
-                        b_use = float(np.sign(b_val)) * max(abs(b_val), 0.25)
+                        b_arr = out[col_b].to_numpy().astype(float)
+                        X_ac = np.column_stack([a_std, c_new_std2, np.ones(N)])
+                        beta_b, _, _, _ = np.linalg.lstsq(X_ac, b_arr, rcond=None)
+                        b_resid = b_arr - X_ac @ beta_b
+                        b_resid = (b_resid - b_resid.mean()) / (b_resid.std() + 1e-8)
+                        cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.22)
+                        b_use = float(np.sign(b_val)) * max(abs(b_val), 0.28)
                         var_used = max(0.0, min(
-                            cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.85))
-                        zb_new = (cp_use * za_std + b_use * zc_new_std
-                                  + math.sqrt(1 - var_used) * b_resid_std)
-                        Z[B_med] = pd.Series(zb_new, index=Z.index)
+                            cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.82))
+                        b_new_std = (cp_use * a_std + b_use * c_new_std2
+                                     + math.sqrt(1 - var_used) * b_resid)
+                        out[col_b] = b_new_std * b_arr.std() + b_arr.mean()
+
+                        # 同步修正小维度均分（C和B的小维度）
+                        for big_dim_fix, col_fix_orig, new_std_fix in [
+                            (C_med, col_c, c_new_std2),
+                            (B_med, col_b, (b_new_std - b_new_std.mean()) / (b_new_std.std() + 1e-8))
+                        ]:
+                            subdims_fix = cfg.get("subdimensions", {}).get(big_dim_fix, {})
+                            orig_arr = out[col_fix_orig].to_numpy().astype(float)
+                            for sub_name_fix in subdims_fix:
+                                safe_fix = re.sub(r"\W+", "", sub_name_fix)
+                                sub_col = f"{big_dim_fix}_{safe_fix}_mean"
+                                if sub_col in out.columns:
+                                    sub_arr = out[sub_col].to_numpy().astype(float)
+                                    # 保留小维度独立方差，叠加修正后的父维度信号
+                                    sub_on_parent = np.dot(sub_arr, new_std_fix) / (np.dot(new_std_fix, new_std_fix) + 1e-8)
+                                    sub_perp = sub_arr - sub_on_parent * new_std_fix
+                                    sub_perp = (sub_perp - sub_perp.mean()) / (sub_perp.std() + 1e-8)
+                                    sub_new = 0.60 * new_std_fix + 0.40 * sub_perp
+                                    out[sub_col] = sub_new * sub_arr.std() + sub_arr.mean()
                 # 5) 输出 DataFrame
                 out = pd.DataFrame({"ID": np.arange(1, N + 1)})
                 if demo.get("use_Q1", False):

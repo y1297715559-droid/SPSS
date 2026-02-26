@@ -863,9 +863,9 @@ with tabs[3]:
                             sub_new = np.zeros(N)
                             if target_vecs:
                                 for tv, tsign in target_vecs:
-                                    w = tsign * (0.35 + 0.02 * si)
+                                    w = tsign * (0.50 + 0.02 * si)
                                     sub_new += w * tv
-                                sub_new += 0.60 * orth_bases[si]
+                                sub_new += 0.35 * orth_bases[si]
                             else:
                                 # 无中介关系时用父维度
                                 parent = Z[big_dim].to_numpy().astype(float)

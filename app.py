@@ -713,7 +713,7 @@ with tabs[3]:
                 # 3) 中介结构（仅读取配置）
                 med = cfg.get("mediation")
 
-                # 4) 人口学差异 β —— 所有维度包括C和B全部先叠加完
+                # 4) 人口学差异 β
                 demo_effects = cfg.get("demo_effects", {})
                 for d in dim_names:
                     eff = demo_effects.get(d, {})
@@ -729,61 +729,6 @@ with tabs[3]:
                                  + b_origin * origin01 + b_cadre * cadre01 + b_only * only01)
                         Z[d] = Z[d] + delta
 
-                # ✅ 终极修正：直接在均分列上强制控制A-C和A-B相关
-                # 注意：必须在均分计算后、out=out[cols]之前执行
-                if med:
-                    A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
-                    a_val = float(med.get("a", 0.6))
-                    b_val = float(med.get("b", 0.6))
-                    cprime_val = float(med.get("cprime", 0.1))
-                    col_a = f"{A_med}_mean"
-                    col_c = f"{C_med}_mean"
-                    col_b = f"{B_med}_mean"
-                    if col_a in out.columns and col_c in out.columns and col_b in out.columns:
-                        a_arr = out[col_a].to_numpy().astype(float)
-                        a_std = (a_arr - a_arr.mean()) / (a_arr.std() + 1e-8)
-                        target_ac = float(np.sign(a_val)) * 0.50
-                        c_arr = out[col_c].to_numpy().astype(float)
-                        c_on_a = np.dot(c_arr, a_std) / (np.dot(a_std, a_std) + 1e-8)
-                        c_perp = c_arr - c_on_a * a_std
-                        c_perp = (c_perp - c_perp.mean()) / (c_perp.std() + 1e-8)
-                        c_new_std = (target_ac * a_std
-                                     + math.sqrt(max(1 - target_ac**2, 1e-6)) * c_perp)
-                        c_new = c_new_std * c_arr.std() + c_arr.mean()
-                        out[col_c] = c_new
-                        c_new_std2 = (c_new - c_new.mean()) / (c_new.std() + 1e-8)
-                        b_arr = out[col_b].to_numpy().astype(float)
-                        X_ac = np.column_stack([a_std, c_new_std2, np.ones(len(a_std))])
-                        beta_b, _, _, _ = np.linalg.lstsq(X_ac, b_arr, rcond=None)
-                        b_resid = b_arr - X_ac @ beta_b
-                        b_resid = (b_resid - b_resid.mean()) / (b_resid.std() + 1e-8)
-                        cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.22)
-                        b_use = float(np.sign(b_val)) * max(abs(b_val), 0.28)
-                        var_used = max(0.0, min(
-                            cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.82))
-                        b_new_std = (cp_use * a_std + b_use * c_new_std2
-                                     + math.sqrt(1 - var_used) * b_resid)
-                        out[col_b] = b_new_std * b_arr.std() + b_arr.mean()
-                        b_new_std2 = (b_new_std - b_new_std.mean()) / (b_new_std.std() + 1e-8)
-                        for big_dim_fix, new_std_fix in [
-                            (C_med, c_new_std2),
-                            (B_med, b_new_std2)
-                        ]:
-                            subdims_fix = cfg.get("subdimensions", {}).get(big_dim_fix, {})
-                            for sub_name_fix in subdims_fix:
-                                safe_fix = re.sub(r"\W+", "", sub_name_fix)
-                                sub_col = f"{big_dim_fix}_{safe_fix}_mean"
-                                if sub_col in out.columns:
-                                    sub_arr = out[sub_col].to_numpy().astype(float)
-                                    sub_on_p = np.dot(sub_arr, new_std_fix) / (np.dot(new_std_fix, new_std_fix) + 1e-8)
-                                    sub_perp = sub_arr - sub_on_p * new_std_fix
-                                    sub_perp = (sub_perp - sub_perp.mean()) / (sub_perp.std() + 1e-8)
-                                    sub_new = 0.60 * new_std_fix + 0.40 * sub_perp
-                                    out[sub_col] = sub_new * sub_arr.std() + sub_arr.mean()
-
-                out = out[cols]
-                st.session_state.generated = out
-                st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
                 # 5) 输出 DataFrame
                 out = pd.DataFrame({"ID": np.arange(1, N + 1)})
                 if demo.get("use_Q1", False):
@@ -808,7 +753,7 @@ with tabs[3]:
                 item_loading = float(item_params.get("loading", 0.8))
                 item_noise = float(item_params.get("noise", 0.75))
 
-                # 预计算小维度独立潜变量（差异化效应，解决多重共线性）
+                # 预计算小维度独立潜变量
                 qid_to_sublatent = {}
                 med_B = cfg.get("mediation", {}).get("B", None)
                 subdims_all_gen = cfg.get("subdimensions", {})
@@ -832,7 +777,7 @@ with tabs[3]:
                                            + outcome_w * outcome_lat
                                            + 0.45 * unique)
                             else:
-                                sub_lat = 0.55 * parent_lat + 0.30 * unique
+                                sub_lat = 0.55 * parent_lat + 0.45 * unique
                             sub_lat = (sub_lat - sub_lat.mean()) / (sub_lat.std() + 1e-8)
                             for qid in subdict[sub_name]:
                                 qid_to_sublatent[qid] = sub_lat
@@ -884,11 +829,6 @@ with tabs[3]:
                     for big_dim, subdict in subdims_all.items():
                         if not isinstance(subdict, dict):
                             continue
-                subdims_all = cfg.get("subdimensions", {})
-                if isinstance(subdims_all, dict):
-                    for big_dim, subdict in subdims_all.items():
-                        if not isinstance(subdict, dict):
-                            continue
                         eff = demo_effects.get(big_dim, {})
                         b_g = float(eff.get("gender", 0.0) or 0.0)
                         b_gr = float(eff.get("grade", 0.0) or 0.0)
@@ -912,7 +852,7 @@ with tabs[3]:
                                 out[col_name] = out[col_name] + delta_sub
                             cols.append(col_name)
 
-                # ✅ 最终修正：直接在均分列上强制控制A-C和A-B相关
+                # ✅ 终极修正：在均分列上精确控制A-C和A-B相关
                 if med:
                     A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
                     a_val = float(med.get("a", 0.6))
@@ -924,30 +864,46 @@ with tabs[3]:
                     if all(c in out.columns for c in [col_a, col_c, col_b]):
                         a_arr = out[col_a].to_numpy().astype(float)
                         a_std = (a_arr - a_arr.mean()) / (a_arr.std() + 1e-8)
-
+                        # target_ac=0.50，R²≈25%，足够显著且符合实际
+                        target_ac = float(np.sign(a_val)) * 0.50
                         c_arr = out[col_c].to_numpy().astype(float)
                         c_on_a = np.dot(c_arr, a_std) / (np.dot(a_std, a_std) + 1e-8)
                         c_perp = c_arr - c_on_a * a_std
                         c_perp = (c_perp - c_perp.mean()) / (c_perp.std() + 1e-8)
-                        target_ac = float(np.sign(a_val)) * 0.35
                         c_new_std = (target_ac * a_std
                                      + math.sqrt(max(1 - target_ac**2, 1e-6)) * c_perp)
                         c_new = c_new_std * c_arr.std() + c_arr.mean()
                         out[col_c] = c_new
                         c_new_std2 = (c_new - c_new.mean()) / (c_new.std() + 1e-8)
-
                         b_arr = out[col_b].to_numpy().astype(float)
-                        X_ac = np.column_stack([a_std, c_new_std2, np.ones(N)])
+                        X_ac = np.column_stack([a_std, c_new_std2, np.ones(len(a_std))])
                         beta_b, _, _, _ = np.linalg.lstsq(X_ac, b_arr, rcond=None)
                         b_resid = b_arr - X_ac @ beta_b
                         b_resid = (b_resid - b_resid.mean()) / (b_resid.std() + 1e-8)
-                        cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.20)
-                        b_use = float(np.sign(b_val)) * max(abs(b_val), 0.25)
+                        cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.22)
+                        b_use = float(np.sign(b_val)) * max(abs(b_val), 0.28)
                         var_used = max(0.0, min(
-                            cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.85))
+                            cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.82))
                         b_new_std = (cp_use * a_std + b_use * c_new_std2
                                      + math.sqrt(1 - var_used) * b_resid)
                         out[col_b] = b_new_std * b_arr.std() + b_arr.mean()
+                        b_new_std2 = (b_new_std - b_new_std.mean()) / (b_new_std.std() + 1e-8)
+                        # 同步修正C和B的小维度
+                        for big_dim_fix, new_std_fix in [
+                            (C_med, c_new_std2),
+                            (B_med, b_new_std2)
+                        ]:
+                            subdims_fix = cfg.get("subdimensions", {}).get(big_dim_fix, {})
+                            for sub_name_fix in subdims_fix:
+                                safe_fix = re.sub(r"\W+", "", sub_name_fix)
+                                sub_col = f"{big_dim_fix}_{safe_fix}_mean"
+                                if sub_col in out.columns:
+                                    sub_arr = out[sub_col].to_numpy().astype(float)
+                                    sub_on_p = np.dot(sub_arr, new_std_fix) / (np.dot(new_std_fix, new_std_fix) + 1e-8)
+                                    sub_perp = sub_arr - sub_on_p * new_std_fix
+                                    sub_perp = (sub_perp - sub_perp.mean()) / (sub_perp.std() + 1e-8)
+                                    sub_new = 0.60 * new_std_fix + 0.40 * sub_perp
+                                    out[sub_col] = sub_new * sub_arr.std() + sub_arr.mean()
 
                 out = out[cols]
                 st.session_state.generated = out

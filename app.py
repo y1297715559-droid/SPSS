@@ -763,7 +763,7 @@ with tabs[3]:
                 item_loading = float(item_params.get("loading", 0.8))
                 item_noise = float(item_params.get("noise", 0.75))
 
-                # 预计算小维度独立潜变量（解决多重共线性）
+                # 预计算小维度独立潜变量（差异化效应，解决多重共线性）
                 qid_to_sublatent = {}
                 med_B = cfg.get("mediation", {}).get("B", None)
                 subdims_all_gen = cfg.get("subdimensions", {})
@@ -775,16 +775,21 @@ with tabs[3]:
                         outcome_lat = (Z[med_B].to_numpy()
                                        if (med_B and med_B in Z.columns and med_B != big_dim)
                                        else None)
-                        for sub_name, sub_qids in subdict.items():
+                        sub_names = list(subdict.keys())
+                        for si, sub_name in enumerate(sub_names):
                             rng_sub = np.random.default_rng(seed + abs(hash(sub_name)) % 9999)
                             unique = rng_sub.standard_normal(N)
-                            unique = unique / (unique.std() + 1e-8)
+                            unique = (unique - unique.mean()) / (unique.std() + 1e-8)
+                            sign = 1.0 if si % 2 == 0 else -1.0
+                            outcome_w = sign * (0.35 + 0.05 * (si % 4))
                             if outcome_lat is not None:
-                                sub_lat = 0.65 * parent_lat + 0.25 * outcome_lat + 0.10 * unique
+                                sub_lat = (0.40 * parent_lat
+                                           + outcome_w * outcome_lat
+                                           + 0.30 * unique)
                             else:
-                                sub_lat = 0.85 * parent_lat + 0.15 * unique
+                                sub_lat = 0.70 * parent_lat + 0.30 * unique
                             sub_lat = (sub_lat - sub_lat.mean()) / (sub_lat.std() + 1e-8)
-                            for qid in sub_qids:
+                            for qid in subdict[sub_name]:
                                 qid_to_sublatent[qid] = sub_lat
 
                 for d in dim_names:

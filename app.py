@@ -792,11 +792,23 @@ with tabs[3]:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
 
-                subdims_all = cfg.get("subdimensions", {})
+subdims_all = cfg.get("subdimensions", {})
                 if isinstance(subdims_all, dict):
                     for big_dim, subdict in subdims_all.items():
                         if not isinstance(subdict, dict):
                             continue
+                        # 获取该大维度的人口学效应
+                        eff = demo_effects.get(big_dim, {})
+                        b_g = float(eff.get("gender", 0.0) or 0.0)
+                        b_gr = float(eff.get("grade", 0.0) or 0.0)
+                        b_or = float(eff.get("origin", 0.0) or 0.0)
+                        b_ca = float(eff.get("cadre", 0.0) or 0.0)
+                        b_on = float(eff.get("only", 0.0) or 0.0)
+                        has_effect = any(abs(x) > 1e-9 for x in [b_g, b_gr, b_or, b_ca, b_on])
+                        delta_sub = (b_g * gender01 + b_gr * grade_num
+                                     + b_or * origin01 + b_ca * cadre01
+                                     + b_on * only01) * item_loading if has_effect else None
+
                         for sub_name, sub_qids in subdict.items():
                             if not sub_qids:
                                 continue
@@ -806,8 +818,10 @@ with tabs[3]:
                             safe_sub = re.sub(r"\W+", "", sub_name)
                             col_name = f"{big_dim}_{safe_sub}_mean"
                             out[col_name] = out[qcols].mean(axis=1)
+                            # 直接叠加人口学效应，确保小维度与大维度显著性一致
+                            if delta_sub is not None:
+                                out[col_name] = out[col_name] + delta_sub
                             cols.append(col_name)
-
                 out = out[cols]
                 # ✅ 存入 session_state
                 st.session_state.generated = out

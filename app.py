@@ -899,13 +899,13 @@ with tabs[3]:
                                 out[col_name] = out[col_name] + delta_sub
                             cols.append(col_name)
                                 if med:
-                    A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
-                    a_val = float(med.get("a", 0.6))
-                    b_val = float(med.get("b", 0.6))
-                    cprime_val = float(med.get("cprime", 0.1))
-                    col_a = f"{A_med}_mean"
-                    col_c = f"{C_med}_mean"
-                    col_b = f"{B_med}_mean"
+                            A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
+                            a_val = float(med.get("a", 0.6))
+                            b_val = float(med.get("b", 0.6))
+                            cprime_val = float(med.get("cprime", 0.1))
+                            col_a = f"{A_med}_mean"
+                            col_c = f"{C_med}_mean"
+                            col_b = f"{B_med}_mean"
                     if all(c in out.columns for c in [col_a, col_c, col_b]):
                         # 取A均分，标准化
                         a_arr = out[col_a].to_numpy().astype(float)

@@ -589,28 +589,42 @@ with tabs[1]:
         )
         
         # 应用 JSON 编辑的按钮
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            if st.button("应用 JSON 配置", use_container_width=True):
-                try:
-                    if edited_config_json != config_json:
-                        new_config = json.loads(edited_config_json)
-                        
-                        # 验证必要的字段
-                        required_fields = ["N", "seed", "scale_start_qid", "dimensions", "demo", "item_params"]
-                        for field in required_fields:
-                            if field not in new_config:
-                                st.error(f"配置缺少必要字段: {field}")
-                                return
-                        
-                        # 验证维度配置
-                        if not isinstance(new_config["dimensions"], dict) or not new_config["dimensions"]:
-                            st.error("维度配置不能为空")
-                            return
-                        
-                        # 验证人口学配置
-                        demo_fields = ["use_Q1", "use_Q2", "use_Q3", "use_Q4", "use_Q5"]
-                        for field in demo
+       with col1:
+    if st.button("应用 JSON 配置", use_container_width=True):
+        try:
+            new_config = json.loads(edited_config_json)
+
+            # 验证必要字段
+            required_fields = ["N", "seed", "scale_start_qid", "dimensions", "demo", "item_params"]
+            missing = [f for f in required_fields if f not in new_config]
+            if missing:
+                st.error(f"配置缺少必要字段: {', '.join(missing)}")
+            elif not isinstance(new_config["dimensions"], dict) or not new_config["dimensions"]:
+                st.error("dimensions 不能为空字典")
+            else:
+                # 补全可能缺失的 demo 字段
+                demo_obj = new_config.get("demo", {})
+                for f in ["use_Q1", "use_Q2", "use_Q3", "use_Q4", "use_Q5"]:
+                    demo_obj.setdefault(f, True)
+                new_config["demo"] = demo_obj
+
+                # ✅ 关键：正式写入 session_state
+                st.session_state.config = new_config
+                st.success("✅ JSON 配置已成功应用！")
+                st.rerun()  # 刷新页面使新配置生效
+
+        except json.JSONDecodeError as e:
+            st.error(f"❌ JSON 格式错误：{e}")
+        except Exception as e:
+            st.error(f"❌ 应用配置时出错：{e}")
+            with col2:
+    st.download_button(
+        "导出当前配置 JSON",
+        data=json.dumps(st.session_state.config, indent=2, ensure_ascii=False).encode("utf-8"),
+        file_name="survey_config.json",
+        mime="application/json",
+        use_container_width=True,
+    )
 # ---------- Tab 3: 关系约束 ----------
 with tabs[2]:
     st.subheader("关系约束：各人口学差异・维度相关矩阵・中介模型")
@@ -806,9 +820,17 @@ with tabs[3]:
                 except Exception:
                     R = np.eye(k)
 
-            if st.button("生成数据", type="primary"):
-                rng = np.random.default_rng(seed)
-                demo = cfg.get("demo", {})
+         if st.button("生成数据", type="primary"):
+    # ... 所有生成逻辑（人口学 → 潜变量 → 题目分数 → 均分）...
+    out = out[cols]
+    st.session_state.generated = out   # ✅ 存入 session_state
+    st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
+
+# ✅ 在按钮块外展示结果（重新加载页面也能保留）
+if "generated" in st.session_state:
+    out = st.session_state.generated
+    st.dataframe(out.head(50), ...)
+    # ... 显著性检验、下载按钮 ...
 
                 # 1) 内部人口学变量（始终生成，用于差异；是否输出列由 use_Q* 决定）
 

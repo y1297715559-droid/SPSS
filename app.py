@@ -1018,7 +1018,7 @@ if isinstance(subdims_all, dict):
 
                 # 5) 构造输出数据框
                 def generate_data():
-    out = pd.DataFrame({"ID": np.arange(1, N + 1)})
+                out = pd.DataFrame({"ID": np.arange(1, N + 1)})
 
                 # 人口学变量按启用情况生成列
                 if demo.get("use_Q1", False):

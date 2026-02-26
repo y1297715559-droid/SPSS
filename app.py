@@ -789,7 +789,22 @@ with tabs[3]:
                     if qcols:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
-
+                # 8) 小维度均分
+                subdims_all = cfg.get("subdimensions", {})
+                if isinstance(subdims_all, dict):
+                    for big_dim, subdict in subdims_all.items():
+                        if not isinstance(subdict, dict):
+                            continue
+                        for sub_name, sub_qids in subdict.items():
+                            if not sub_qids:
+                                continue
+                            qcols = [f"Q{qid}" for qid in sub_qids if f"Q{qid}" in out.columns]
+                            if not qcols:
+                                continue
+                            safe_sub = re.sub(r"\W+", "", sub_name)
+                            col_name = f"{big_dim}_{safe_sub}_mean"
+                            out[col_name] = out[qcols].mean(axis=1)
+                            cols.append(col_name)
                 out = out[cols]
                 st.session_state.generated = out
                 st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")

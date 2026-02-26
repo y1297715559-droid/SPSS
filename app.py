@@ -828,6 +828,36 @@ with tabs[3]:
                             for qid in subdict[sub_name]:
                                 qid_to_sublatent[qid] = final_lats[si]
 
+                # 题目生成
+                for d in dim_names:
+                    qids = sorted([qid for qid, dd in qid_to_dim.items()
+                                   if dd == d and qid >= scale_start_qid])
+                    if not qids:
+                        continue
+                    seen = set()
+                    for qid in qids:
+                        if qid in seen:
+                            continue
+                        if qid in qid_to_sublatent:
+                            lat = qid_to_sublatent[qid]
+                            grp = [q for q in qids if q not in seen
+                                   and qid_to_sublatent.get(q) is lat]
+                        else:
+                            lat = Z[d].to_numpy()
+                            grp = [q for q in qids if q not in seen
+                                   and q not in qid_to_sublatent]
+                        disc = latent_to_items(
+                            lat, len(grp),
+                            mean=item_mean, loading=item_loading, noise=item_noise,
+                            seed=seed + 13 + (hash(d) % 1000) + (hash(qid) % 500),
+                        )
+                        for idx, q in enumerate(grp):
+                            x = disc[:, idx]
+                            if q in rev:
+                                x = 6 - x
+                            out[f"Q{q}"] = x
+                            seen.add(q)
+
                 # 7) 均分
                 cols = ["ID"]
                 for qid in all_qids:
@@ -960,6 +990,10 @@ with tabs[3]:
                                 sub_perp = (sub_perp - sub_perp.mean()) / (sub_perp.std() + 1e-8)
                                 sub_new = 0.55 * b_new_std2 + 0.45 * sub_perp
                                 out[sub_col] = sub_new * sub_arr.std() + sub_arr.mean()
+
+                out = out[cols]
+                st.session_state.generated = out
+                st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
             # ✅ 在按钮块外展示结果
             if "generated" in st.session_state:
                 out = st.session_state.generated

@@ -873,7 +873,11 @@ with tabs[3]:
                     for big_dim, subdict in subdims_all.items():
                         if not isinstance(subdict, dict):
                             continue
-                        # 获取该大维度的人口学效应
+                subdims_all = cfg.get("subdimensions", {})
+                if isinstance(subdims_all, dict):
+                    for big_dim, subdict in subdims_all.items():
+                        if not isinstance(subdict, dict):
+                            continue
                         eff = demo_effects.get(big_dim, {})
                         b_g = float(eff.get("gender", 0.0) or 0.0)
                         b_gr = float(eff.get("grade", 0.0) or 0.0)
@@ -884,7 +888,6 @@ with tabs[3]:
                         delta_sub = (b_g * gender01 + b_gr * grade_num
                                      + b_or * origin01 + b_ca * cadre01
                                      + b_on * only01) * item_loading if has_effect else None
-
                         for sub_name, sub_qids in subdict.items():
                             if not sub_qids:
                                 continue
@@ -894,87 +897,50 @@ with tabs[3]:
                             safe_sub = re.sub(r"\W+", "", sub_name)
                             col_name = f"{big_dim}_{safe_sub}_mean"
                             out[col_name] = out[qcols].mean(axis=1)
-                            # 直接叠加人口学效应，确保小维度与大维度显著性一致
                             if delta_sub is not None:
                                 out[col_name] = out[col_name] + delta_sub
                             cols.append(col_name)
-                                if med:
-                            A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
-                            a_val = float(med.get("a", 0.6))
-                            b_val = float(med.get("b", 0.6))
-                            cprime_val = float(med.get("cprime", 0.1))
-                            col_a = f"{A_med}_mean"
-                            col_c = f"{C_med}_mean"
-                            col_b = f"{B_med}_mean"
+
+                # ✅ 最终修正：直接在均分列上强制控制A-C和A-B相关
+                if med:
+                    A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
+                    a_val = float(med.get("a", 0.6))
+                    b_val = float(med.get("b", 0.6))
+                    cprime_val = float(med.get("cprime", 0.1))
+                    col_a = f"{A_med}_mean"
+                    col_c = f"{C_med}_mean"
+                    col_b = f"{B_med}_mean"
                     if all(c in out.columns for c in [col_a, col_c, col_b]):
-                        # 取A均分，标准化
                         a_arr = out[col_a].to_numpy().astype(float)
                         a_std = (a_arr - a_arr.mean()) / (a_arr.std() + 1e-8)
 
-                        # --- 修正C：正交分解后精确重组 ---
                         c_arr = out[col_c].to_numpy().astype(float)
-                        # C中与A正交的部分（保留C自身人口学）
                         c_on_a = np.dot(c_arr, a_std) / (np.dot(a_std, a_std) + 1e-8)
                         c_perp = c_arr - c_on_a * a_std
                         c_perp = (c_perp - c_perp.mean()) / (c_perp.std() + 1e-8)
-                        # 目标相关0.35，R²≈12%
                         target_ac = float(np.sign(a_val)) * 0.35
                         c_new_std = (target_ac * a_std
                                      + math.sqrt(max(1 - target_ac**2, 1e-6)) * c_perp)
-                        # 还原到原始C的均值和标准差
-                        c_new = (c_new_std * c_arr.std() + c_arr.mean())
+                        c_new = c_new_std * c_arr.std() + c_arr.mean()
                         out[col_c] = c_new
                         c_new_std2 = (c_new - c_new.mean()) / (c_new.std() + 1e-8)
 
-                        # --- 修正B：提取B残差，重组保证A→B显著 ---
                         b_arr = out[col_b].to_numpy().astype(float)
-                        # B中独立于A和C的残差（含B自身人口学）
                         X_ac = np.column_stack([a_std, c_new_std2, np.ones(N)])
                         beta_b, _, _, _ = np.linalg.lstsq(X_ac, b_arr, rcond=None)
                         b_resid = b_arr - X_ac @ beta_b
                         b_resid = (b_resid - b_resid.mean()) / (b_resid.std() + 1e-8)
-                        # 重组：A直接效应+C间接效应+残差
                         cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.20)
                         b_use = float(np.sign(b_val)) * max(abs(b_val), 0.25)
                         var_used = max(0.0, min(
                             cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.85))
                         b_new_std = (cp_use * a_std + b_use * c_new_std2
                                      + math.sqrt(1 - var_used) * b_resid)
-                        # 还原到原始B的均值和标准差
                         out[col_b] = b_new_std * b_arr.std() + b_arr.mean()
+
                 out = out[cols]
-                # ✅ 存入 session_state
                 st.session_state.generated = out
                 st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
-
-            # ✅ FIX 3: 在按钮块外展示结果（重载不丢失）
-            if "generated" in st.session_state:
-                out = st.session_state.generated
-                cfg = st.session_state.config
-                demo = cfg.get("demo", {})
-
-                st.dataframe(out.head(50), use_container_width=True)
-
-                st.markdown("### 人口学差异显著性（基于本次模拟数据）")
-                dim_mean_cols = [c for c in out.columns if c.endswith("_mean")]
-
-                def _ttest_binary(y, g01):
-                    y = np.asarray(y, dtype=float)
-                    g01 = np.asarray(g01, dtype=int)
-                    mask0, mask1 = g01 == 0, g01 == 1
-                    n0, n1 = mask0.sum(), mask1.sum()
-                    if n0 < 2 or n1 < 2:
-                        return None, None, None
-                    y0, y1 = y[mask0], y[mask1]
-                    m0, m1 = y0.mean(), y1.mean()
-                    v0, v1 = y0.var(ddof=1), y1.var(ddof=1)
-                    sp2 = ((n0 - 1) * v0 + (n1 - 1) * v1) / (n0 + n1 - 2)
-                    if sp2 <= 0:
-                        return m1 - m0, None, None
-                    t = (m1 - m0) / math.sqrt(sp2 * (1.0 / n0 + 1.0 / n1))
-                    p = 2 * (1.0 - _norm_cdf(abs(t)))
-                    return m1 - m0, t, p
-
                 def _reg_slope(y, x):
                     y = np.asarray(y, dtype=float)
                     x = np.asarray(x, dtype=float)

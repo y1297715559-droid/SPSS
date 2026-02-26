@@ -746,7 +746,6 @@ with tabs[3]:
                         )
                         Z[d] = Z[d] + delta
                         subdims_all = cfg.get("subdimensions", {})
-# 5) 构造输出数据框：调整 generate_data 函数的缩进
 def generate_data():
     out = pd.DataFrame({"ID": np.arange(1, N + 1)})
     # 进一步处理数据
@@ -763,299 +762,297 @@ def generate_data():
     if demo.get("use_Q5", False):
         out["Q5"] = only_cat
 
-    return out
+    # 6) 潜变量 → 题目分数（只对 qid >= scale_start_qid 的题目生成 1~5）
+    qid_to_dim = {}
+    for d in dim_names:
+        for qid in dims_map[d]:
+            qid_to_dim[qid] = d
+    rev = set(cfg.get("reverse_items", []))
 
-                # 6) 潜变量 → 题目分数（只对 qid >= scale_start_qid 的题目生成 1~5）
-                qid_to_dim = {}
-                for d in dim_names:
-                    for qid in dims_map[d]:
-                        qid_to_dim[qid] = d
-                rev = set(cfg.get("reverse_items", []))
+    item_params = cfg.get("item_params", {})
+    item_mean = float(item_params.get("mean", 3.6))
+    item_loading = float(item_params.get("loading", 0.8))
+    item_noise = float(item_params.get("noise", 0.75))
 
-                item_params = cfg.get("item_params", {})
-                item_mean = float(item_params.get("mean", 3.6))
-                item_loading = float(item_params.get("loading", 0.8))
-                item_noise = float(item_params.get("noise", 0.75))
+    for d in dim_names:
+        qids = [qid for qid, dd in qid_to_dim.items() if dd == d and qid >= scale_start_qid]
+        if not qids:
+            continue
+        qids = sorted(qids)
+        disc = latent_to_items(
+            Z[d].to_numpy(),
+            len(qids),
+            mean=item_mean,
+            loading=item_loading,
+            noise=item_noise,
+            seed=seed + 13 + (hash(d) % 1000),
+        )
+        for idx, qid in enumerate(qids):
+            x = disc[:, idx]
+            if qid in rev:
+                x = 6 - x
+            out[f"Q{qid}"] = x
 
-                for d in dim_names:
-                    qids = [qid for qid, dd in qid_to_dim.items() if dd == d and qid >= scale_start_qid]
+    # 7) 各维度均分 + 小维度均分
+    cols = ["ID"]
+    for qid in all_qids:
+        col = f"Q{qid}"
+        if col in out.columns:
+            cols.append(col)
+
+    # 大维度均分
+    for d in dim_names:
+        qcols = [f"Q{qid}" for qid in dims_map[d] if f"Q{qid}" in out.columns]
+        if qcols:
+            out[f"{d}_mean"] = out[qcols].mean(axis=1)
+            cols.append(f"{d}_mean")
+
+    # 小维度均分
+    subdims_all = cfg.get("subdimensions", {})
+    if isinstance(subdims_all, dict):
+        for big_dim, subdict in subdims_all.items():
+            if not isinstance(subdict, dict):
+                continue
+            for sub_name, qids in subdict.items():
+                if not qids:
+                    continue
+                qcols = [f"Q{qid}" for qid in qids if f"Q{qid}" in out.columns]
+                if not qcols:
+                    continue
+                safe_sub = re.sub(r"\W+", "", sub_name)
+                col_name = f"{big_dim}_{safe_sub}_mean"
+                out[col_name] = out[qcols].mean(axis=1)
+                cols.append(col_name)
+
+    out = out[cols]
+
+    st.session_state.generated = out
+    st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
+
+    # 预览与导出
+    if "generated" in st.session_state:
+        out = st.session_state.generated
+        st.dataframe(out.head(50), use_container_width=True)
+
+        # ===== 人口学显著性检查（基于本次模拟数据） =====
+        st.markdown("### 人口学差异显著性（基于本次模拟数据）")
+
+        dim_mean_cols = [c for c in out.columns if c.endswith("_mean")]
+        demo = cfg.get("demo", {})
+
+        results = []
+
+        # 工具函数：二分类 t 检验（正态近似 p）
+        def _ttest_binary(y, g01):
+            y = np.asarray(y, dtype=float)
+            g01 = np.asarray(g01, dtype=int)
+            mask0 = g01 == 0
+            mask1 = g01 == 1
+            n0 = mask0.sum()
+            n1 = mask1.sum()
+            if n0 < 2 or n1 < 2:
+                return None, None, None
+            y0 = y[mask0]
+            y1 = y[mask1]
+            m0 = y0.mean()
+            m1 = y1.mean()
+            v0 = y0.var(ddof=1)
+            v1 = y1.var(ddof=1)
+            # 合并方差
+            sp2 = ((n0 - 1) * v0 + (n1 - 1) * v1) / (n0 + n1 - 2)
+            if sp2 <= 0:
+                return m1 - m0, None, None
+            t = (m1 - m0) / math.sqrt(sp2 * (1.0 / n0 + 1.0 / n1))
+            # 大样本用正态近似
+            p = 2 * (1.0 - _norm_cdf(abs(t)))
+            return m1 - m0, t, p
+
+        # 工具函数：简单回归 y ~ x，返回斜率及显著性
+        def _reg_slope(y, x):
+            y = np.asarray(y, dtype=float)
+            x = np.asarray(x, dtype=float)
+            n = len(y)
+            if n < 3:
+                return None, None, None
+            x_mean = x.mean()
+            y_mean = y.mean()
+            Sxx = ((x - x_mean) ** 2).sum()
+            if Sxx <= 0:
+                return None, None, None
+            Sxy = ((x - x_mean) * (y - y_mean)).sum()
+            b1 = Sxy / Sxx  # 斜率
+            # 残差
+            y_hat = y_mean + b1 * (x - x_mean)
+            resid = y - y_hat
+            RSS = (resid ** 2).sum()
+            s2 = RSS / (n - 2)
+            if s2 <= 0:
+                return b1, None, None
+            se_b1 = math.sqrt(s2 / Sxx)
+            t = b1 / se_b1
+            p = 2 * (1.0 - _norm_cdf(abs(t)))
+            return b1, t, p
+
+        # 遍历每个维度均分
+        for dim_col in dim_mean_cols:
+            y = out[dim_col].to_numpy()
+
+            # Q1 性别：1=男,2=女 -> 0/1
+            if "Q1" in out.columns and demo.get("use_Q1", False):
+                g = (out["Q1"].to_numpy() == 2).astype(int)  # 女=1
+                diff, t, p = _ttest_binary(y, g)
+                if p is not None:
+                    sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                    results.append([dim_col, "性别(女 vs 男)", diff, t, p, sig])
+
+            # Q2 年级：1..k -> 回归（年级越高越大）
+            if "Q2" in out.columns and demo.get("use_Q2", False):
+                x = out["Q2"].to_numpy().astype(float)  # 1,2,3,4...
+                b1, t, p = _reg_slope(y, x)
+                if p is not None:
+                    sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                    results.append([dim_col, "年级(高年级更高为正)", b1, t, p, sig])
+
+            # Q3 生源地：1=城镇,2=农村
+            if "Q3" in out.columns and demo.get("use_Q3", False):
+                g = (out["Q3"].to_numpy() == 2).astype(int)  # 农村=1
+                diff, t, p = _ttest_binary(y, g)
+                if p is not None:
+                    sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                    results.append([dim_col, "生源地(农村 vs 城镇)", diff, t, p, sig])
+
+            # Q4 班干部：1=是,2=否
+            if "Q4" in out.columns and demo.get("use_Q4", False):
+                g = (out["Q4"].to_numpy() == 1).astype(int)  # 班干部=1
+                diff, t, p = _ttest_binary(y, g)
+                if p is not None:
+                    sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                    results.append([dim_col, "班干部(是 vs 否)", diff, t, p, sig])
+
+            # Q5 独生：1=独生,2=非独生
+            if "Q5" in out.columns and demo.get("use_Q5", False):
+                g = (out["Q5"].to_numpy() == 1).astype(int)  # 独生=1
+                diff, t, p = _ttest_binary(y, g)
+                if p is not None:
+                    sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                    results.append([dim_col, "独生(独生 vs 非独生)", diff, t, p, sig])
+
+        if results:
+            df_sig = pd.DataFrame(
+                results,
+                columns=["维度均分变量", "人口学变量", "差异/斜率(高-低)", "t值", "p(正态近似)", "显著性"]
+            )
+            # 保留三位小数
+            df_sig["差异/斜率(高-低)"] = df_sig["差异/斜率(高-低)"].round(3)
+            df_sig["t值"] = df_sig["t值"].round(3)
+            df_sig["p(正态近似)"] = df_sig["p(正态近似)"].round(4)
+
+            st.dataframe(df_sig, use_container_width=True)
+            st.caption("显著性说明：*** p<.001，** p<.01，* p<.05，ns 不显著（基于正态近似）。")
+        else:
+            st.info("当前没有可检验的人口学变量或维度均分列。")
+
+        # 变量标签
+        var_labels = {"ID": "Respondent ID"}
+        for q in qs:
+            col = f"Q{q['qid']}"
+            if col in out.columns:
+                var_labels[col] = q["stem"][:240]
+        for d in dim_names:
+            if f"{d}_mean" in out.columns:
+                var_labels[f"{d}_mean"] = f"{d}（大维度均分）"
+
+        # 小维度标签
+        subdims_all = cfg.get("subdimensions", {})
+        if isinstance(subdims_all, dict):
+            for big_dim, subdict in subdims_all.items():
+                if not isinstance(subdict, dict):
+                    continue
+                for sub_name, qids in subdict.items():
                     if not qids:
                         continue
-                    qids = sorted(qids)
-                    disc = latent_to_items(
-                        Z[d].to_numpy(),
-                        len(qids),
-                        mean=item_mean,
-                        loading=item_loading,
-                        noise=item_noise,
-                        seed=seed + 13 + (hash(d) % 1000),
-                    )
-                    for idx, qid in enumerate(qids):
-                        x = disc[:, idx]
-                        if qid in rev:
-                            x = 6 - x
-                        out[f"Q{qid}"] = x
+                    safe_sub = re.sub(r"\W+", "", sub_name)
+                    col_name = f"{big_dim}_{safe_sub}_mean"
+                    if col_name in out.columns:
+                        var_labels[col_name] = f"{big_dim}-{sub_name}（小维度均分）"
 
-                # 7) 各维度均分 + 小维度均分
-                cols = ["ID"]
-                for qid in all_qids:
-                    col = f"Q{qid}"
-                    if col in out.columns:
-                        cols.append(col)
+        # 值标签
+        value_labels = {}
+        demo = cfg.get("demo", {})
 
-                # 大维度均分
-                for d in dim_names:
-                    qcols = [f"Q{qid}" for qid in dims_map[d] if f"Q{qid}" in out.columns]
-                    if qcols:
-                        out[f"{d}_mean"] = out[qcols].mean(axis=1)
-                        cols.append(f"{d}_mean")
+        if "Q1" in out.columns:
+            value_labels["Q1"] = {1: "男", 2: "女"}
+        if "Q2" in out.columns:
+            grade_levels = int(demo.get("grade_levels", 3))
+            if grade_levels not in (3, 4):
+                grade_levels = 3
+            if grade_levels == 3:
+                q2_labels = {1: "大一", 2: "大二", 3: "大三"}
+            else:
+                q2_labels = {1: "大一", 2: "大二", 3: "大三", 4: "大四"}
+            value_labels["Q2"] = q2_labels
+        if "Q3" in out.columns:
+            value_labels["Q3"] = {1: "城镇", 2: "农村"}
+        if "Q4" in out.columns:
+            value_labels["Q4"] = {1: "是", 2: "否"}
+        if "Q5" in out.columns:
+            value_labels["Q5"] = {1: "独生子女", 2: "非独生子女"}
 
-                # 小维度均分
-                subdims_all = cfg.get("subdimensions", {})
-                if isinstance(subdims_all, dict):
-                    for big_dim, subdict in subdims_all.items():
-                        if not isinstance(subdict, dict):
-                            continue
-                        for sub_name, qids in subdict.items():
-                            if not qids:
-                                continue
-                            qcols = [f"Q{qid}" for qid in qids if f"Q{qid}" in out.columns]
-                            if not qcols:
-                                continue
-                            safe_sub = re.sub(r"\W+", "", sub_name)
-                            col_name = f"{big_dim}_{safe_sub}_mean"
-                            out[col_name] = out[qcols].mean(axis=1)
-                            cols.append(col_name)
+        # 量表题：从 scale_start_qid 开始，赋 1~5 选项
+        for qid in all_qids:
+            col = f"Q{qid}"
+            if col in out.columns and qid >= scale_start_qid:
+                value_labels[col] = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
 
-                out = out[cols]
+        # CSV
+        csv_bytes = out.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        st.download_button(
+            "下载 CSV",
+            data=csv_bytes,
+            file_name="synthetic_data.csv",
+            mime="text/csv",
+        )
 
-                st.session_state.generated = out
-                st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
+        # SPSS 语法
+        sps = make_spss_syntax_for_csv(
+            "synthetic_data.csv",
+            out.columns.tolist(),
+            var_labels,
+            value_labels,
+        )
+        st.download_button(
+            "下载 .sps（导入 + 标签）",
+            data=sps.encode("utf-8"),
+            file_name="import_and_label.sps",
+            mime="text/plain",
+        )
 
-            # 预览与导出
-            if "generated" in st.session_state:
-                out = st.session_state.generated
-                st.dataframe(out.head(50), use_container_width=True)
+        # 可选：.sav
+        if HAS_PYREADSTAT:
+            import tempfile
+            import os
 
-                # ===== 人口学显著性检查（基于本次模拟数据） =====
-                st.markdown("### 人口学差异显著性（基于本次模拟数据）")
-
-                dim_mean_cols = [c for c in out.columns if c.endswith("_mean")]
-                demo = cfg.get("demo", {})
-
-                results = []
-
-                # 工具函数：二分类 t 检验（正态近似 p）
-                def _ttest_binary(y, g01):
-                    y = np.asarray(y, dtype=float)
-                    g01 = np.asarray(g01, dtype=int)
-                    mask0 = g01 == 0
-                    mask1 = g01 == 1
-                    n0 = mask0.sum()
-                    n1 = mask1.sum()
-                    if n0 < 2 or n1 < 2:
-                        return None, None, None
-                    y0 = y[mask0]
-                    y1 = y[mask1]
-                    m0 = y0.mean()
-                    m1 = y1.mean()
-                    v0 = y0.var(ddof=1)
-                    v1 = y1.var(ddof=1)
-                    # 合并方差
-                    sp2 = ((n0 - 1) * v0 + (n1 - 1) * v1) / (n0 + n1 - 2)
-                    if sp2 <= 0:
-                        return m1 - m0, None, None
-                    t = (m1 - m0) / math.sqrt(sp2 * (1.0 / n0 + 1.0 / n1))
-                    # 大样本用正态近似
-                    p = 2 * (1.0 - _norm_cdf(abs(t)))
-                    return m1 - m0, t, p
-
-                # 工具函数：简单回归 y ~ x，返回斜率及显著性
-                def _reg_slope(y, x):
-                    y = np.asarray(y, dtype=float)
-                    x = np.asarray(x, dtype=float)
-                    n = len(y)
-                    if n < 3:
-                        return None, None, None
-                    x_mean = x.mean()
-                    y_mean = y.mean()
-                    Sxx = ((x - x_mean) ** 2).sum()
-                    if Sxx <= 0:
-                        return None, None, None
-                    Sxy = ((x - x_mean) * (y - y_mean)).sum()
-                    b1 = Sxy / Sxx  # 斜率
-                    # 残差
-                    y_hat = y_mean + b1 * (x - x_mean)
-                    resid = y - y_hat
-                    RSS = (resid ** 2).sum()
-                    s2 = RSS / (n - 2)
-                    if s2 <= 0:
-                        return b1, None, None
-                    se_b1 = math.sqrt(s2 / Sxx)
-                    t = b1 / se_b1
-                    p = 2 * (1.0 - _norm_cdf(abs(t)))
-                    return b1, t, p
-
-                # 遍历每个维度均分
-                for dim_col in dim_mean_cols:
-                    y = out[dim_col].to_numpy()
-
-                    # Q1 性别：1=男,2=女 -> 0/1
-                    if "Q1" in out.columns and demo.get("use_Q1", False):
-                        g = (out["Q1"].to_numpy() == 2).astype(int)  # 女=1
-                        diff, t, p = _ttest_binary(y, g)
-                        if p is not None:
-                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "性别(女 vs 男)", diff, t, p, sig])
-
-                    # Q2 年级：1..k -> 回归（年级越高越大）
-                    if "Q2" in out.columns and demo.get("use_Q2", False):
-                        x = out["Q2"].to_numpy().astype(float)  # 1,2,3,4...
-                        b1, t, p = _reg_slope(y, x)
-                        if p is not None:
-                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "年级(高年级更高为正)", b1, t, p, sig])
-
-                    # Q3 生源地：1=城镇,2=农村
-                    if "Q3" in out.columns and demo.get("use_Q3", False):
-                        g = (out["Q3"].to_numpy() == 2).astype(int)  # 农村=1
-                        diff, t, p = _ttest_binary(y, g)
-                        if p is not None:
-                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "生源地(农村 vs 城镇)", diff, t, p, sig])
-
-                    # Q4 班干部：1=是,2=否
-                    if "Q4" in out.columns and demo.get("use_Q4", False):
-                        g = (out["Q4"].to_numpy() == 1).astype(int)  # 班干部=1
-                        diff, t, p = _ttest_binary(y, g)
-                        if p is not None:
-                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "班干部(是 vs 否)", diff, t, p, sig])
-
-                    # Q5 独生：1=独生,2=非独生
-                    if "Q5" in out.columns and demo.get("use_Q5", False):
-                        g = (out["Q5"].to_numpy() == 1).astype(int)  # 独生=1
-                        diff, t, p = _ttest_binary(y, g)
-                        if p is not None:
-                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "独生(独生 vs 非独生)", diff, t, p, sig])
-
-                if results:
-                    df_sig = pd.DataFrame(
-                        results,
-                        columns=["维度均分变量", "人口学变量", "差异/斜率(高-低)", "t值", "p(正态近似)", "显著性"]
-                    )
-                    # 保留三位小数
-                    df_sig["差异/斜率(高-低)"] = df_sig["差异/斜率(高-低)"].round(3)
-                    df_sig["t值"] = df_sig["t值"].round(3)
-                    df_sig["p(正态近似)"] = df_sig["p(正态近似)"].round(4)
-
-                    st.dataframe(df_sig, use_container_width=True)
-                    st.caption("显著性说明：*** p<.001，** p<.01，* p<.05，ns 不显著（基于正态近似）。")
-                else:
-                    st.info("当前没有可检验的人口学变量或维度均分列。")
-
-                # 变量标签
-                var_labels = {"ID": "Respondent ID"}
-                for q in qs:
-                    col = f"Q{q['qid']}"
-                    if col in out.columns:
-                        var_labels[col] = q["stem"][:240]
-                for d in dim_names:
-                    if f"{d}_mean" in out.columns:
-                        var_labels[f"{d}_mean"] = f"{d}（大维度均分）"
-
-                # 小维度标签
-                subdims_all = cfg.get("subdimensions", {})
-                if isinstance(subdims_all, dict):
-                    for big_dim, subdict in subdims_all.items():
-                        if not isinstance(subdict, dict):
-                            continue
-                        for sub_name, qids in subdict.items():
-                            if not qids:
-                                continue
-                            safe_sub = re.sub(r"\W+", "", sub_name)
-                            col_name = f"{big_dim}_{safe_sub}_mean"
-                            if col_name in out.columns:
-                                var_labels[col_name] = f"{big_dim}-{sub_name}（小维度均分）"
-
-                # 值标签
-                value_labels = {}
-                demo = cfg.get("demo", {})
-
-                if "Q1" in out.columns:
-                    value_labels["Q1"] = {1: "男", 2: "女"}
-                if "Q2" in out.columns:
-                    grade_levels = int(demo.get("grade_levels", 3))
-                    if grade_levels not in (3, 4):
-                        grade_levels = 3
-                    if grade_levels == 3:
-                        q2_labels = {1: "大一", 2: "大二", 3: "大三"}
-                    else:
-                        q2_labels = {1: "大一", 2: "大二", 3: "大三", 4: "大四"}
-                    value_labels["Q2"] = q2_labels
-                if "Q3" in out.columns:
-                    value_labels["Q3"] = {1: "城镇", 2: "农村"}
-                if "Q4" in out.columns:
-                    value_labels["Q4"] = {1: "是", 2: "否"}
-                if "Q5" in out.columns:
-                    value_labels["Q5"] = {1: "独生子女", 2: "非独生子女"}
-
-                # 量表题：从 scale_start_qid 开始，赋 1~5 选项
-                for qid in all_qids:
-                    col = f"Q{qid}"
-                    if col in out.columns and qid >= scale_start_qid:
-                        value_labels[col] = {1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
-
-                # CSV
-                csv_bytes = out.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+            with tempfile.NamedTemporaryFile(suffix=".sav", delete=False) as tf:
+                path = tf.name
+            try:
+                pyreadstat.write_sav(
+                    out,
+                    path,
+                    column_labels=var_labels,
+                    variable_value_labels=value_labels,
+                )
+                with open(path, "rb") as f:
+                    sav = f.read()
                 st.download_button(
-                    "下载 CSV",
-                    data=csv_bytes,
-                    file_name="synthetic_data.csv",
-                    mime="text/csv",
+                    "下载 .sav（含标签）",
+                    data=sav,
+                    file_name="synthetic_data.sav",
+                    mime="application/octet-stream",
                 )
-
-                # SPSS 语法
-                sps = make_spss_syntax_for_csv(
-                    "synthetic_data.csv",
-                    out.columns.tolist(),
-                    var_labels,
-                    value_labels,
-                )
-                st.download_button(
-                    "下载 .sps（导入 + 标签）",
-                    data=sps.encode("utf-8"),
-                    file_name="import_and_label.sps",
-                    mime="text/plain",
-                )
-
-                # 可选：.sav
-                if HAS_PYREADSTAT:
-                    import tempfile
-                    import os
-
-                    with tempfile.NamedTemporaryFile(suffix=".sav", delete=False) as tf:
-                        path = tf.name
-                    try:
-                        pyreadstat.write_sav(
-                            out,
-                            path,
-                            column_labels=var_labels,
-                            variable_value_labels=value_labels,
-                        )
-                        with open(path, "rb") as f:
-                            sav = f.read()
-                        st.download_button(
-                            "下载 .sav（含标签）",
-                            data=sav,
-                            file_name="synthetic_data.sav",
-                            mime="application/octet-stream",
-                        )
-                    finally:
-                        try:
-                            os.remove(path)
-                        except Exception:
-                            pass
-                else:
-                    st.info("未安装 pyreadstat：可以用 CSV + .sps 在 SPSS 中导入，效果相同。")
+            finally:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        else:
+            st.info("未安装 pyreadstat：可以用 CSV + .sps 在 SPSS 中导入，效果相同。")

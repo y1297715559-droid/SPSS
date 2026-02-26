@@ -770,8 +770,8 @@ with tabs[3]:
                             rng_sub = np.random.default_rng(seed + abs(hash(sub_name)) % 9999)
                             unique = rng_sub.standard_normal(N)
                             unique = (unique - unique.mean()) / (unique.std() + 1e-8)
-                            sign = 1.0 if si % 2 == 0 else -1.0
-                            outcome_w = sign * (0.35 + 0.05 * (si % 4))
+                            outcome_sign = float(np.sign(a_val)) if med and med.get("a", 0) != 0 else -1.0
+                            outcome_w = outcome_sign * (0.30 + 0.02 * si)
                             if outcome_lat is not None:
                                 sub_lat = (0.25 * parent_lat
                                            + outcome_w * outcome_lat

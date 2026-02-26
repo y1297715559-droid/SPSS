@@ -794,8 +794,17 @@ with tabs[3]:
 
                         # 3) 确定目标变量（C或B）
                         if big_dim == med_A and med_C and med_C in Z.columns:
-                            target_lat = Z[med_C].to_numpy().astype(float)
-                            target_lat = (target_lat - target_lat.mean()) / (target_lat.std() + 1e-8)
+                            # A的小维度同时包含C和B的信号，保证对两者都显著
+                            t_c = Z[med_C].to_numpy().astype(float)
+                            t_c = (t_c - t_c.mean()) / (t_c.std() + 1e-8)
+                            if med_B_name and med_B_name in Z.columns:
+                                t_b = Z[med_B_name].to_numpy().astype(float)
+                                t_b = (t_b - t_b.mean()) / (t_b.std() + 1e-8)
+                                # 组合C和B信号，权重各0.5
+                                target_lat = 0.5 * t_c + 0.5 * t_b
+                                target_lat = (target_lat - target_lat.mean()) / (target_lat.std() + 1e-8)
+                            else:
+                                target_lat = t_c
                             eff_sign = outcome_sign_global
                         elif big_dim == med_C and med_B_name and med_B_name in Z.columns:
                             target_lat = Z[med_B_name].to_numpy().astype(float)
@@ -922,14 +931,14 @@ with tabs[3]:
                             sub_names_a, sub_lats_a = a_sub_info
                             c_new = np.zeros(N)
                             for si, sn in enumerate(sub_names_a):
-                                sc = f"{A_med}_{re.sub(r'W+', '', sn)}_mean"
+                                sc = f"{A_med}_{re.sub(r'\W+', '', sn)}_mean"
                                 if sc in out.columns:
                                     sv = out[sc].to_numpy().astype(float)
                                     sv_std = (sv - sv.mean()) / (sv.std() + 1e-8)
                                     c_new += outcome_sign * (0.25 + 0.03 * si) * sv_std
                             noise_c = rng_fix.standard_normal(N)
                             noise_c = (noise_c - noise_c.mean()) / (noise_c.std() + 1e-8)
-                            c_new += 0.55 * noise_c
+                            c_new += 0.85 * noise_c
                             c_new = (c_new - c_new.mean()) / (c_new.std() + 1e-8)
                             c_new = c_new * c_arr.std() + c_arr.mean()
                         else:
@@ -950,7 +959,7 @@ with tabs[3]:
                             sub_names_c, sub_lats_c = c_sub_info
                             b_new = np.zeros(N)
                             for si, sn in enumerate(sub_names_c):
-                                sc = f"{C_med}_{re.sub(r'W+', '', sn)}_mean"
+                                sc = f"{C_med}_{re.sub(r'\W+', '', sn)}_mean"
                                 if sc in out.columns:
                                     sv = out[sc].to_numpy().astype(float)
                                     sv_std = (sv - sv.mean()) / (sv.std() + 1e-8)
@@ -960,7 +969,7 @@ with tabs[3]:
                             b_new += cp_use * a_std
                             noise_b = rng_fix.standard_normal(N)
                             noise_b = (noise_b - noise_b.mean()) / (noise_b.std() + 1e-8)
-                            b_new += 0.50 * noise_b
+                            b_new += 0.80 * noise_b
                             b_new = (b_new - b_new.mean()) / (b_new.std() + 1e-8)
                             b_new = b_new * b_arr.std() + b_arr.mean()
                         else:

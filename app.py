@@ -953,6 +953,23 @@ with tabs[3]:
                 st.markdown("### 人口学差异显著性（基于本次模拟数据）")
                 dim_mean_cols = [c for c in out.columns if c.endswith("_mean")]
 
+                def _ttest_binary(y, g01):
+                    y = np.asarray(y, dtype=float)
+                    g01 = np.asarray(g01, dtype=int)
+                    mask0, mask1 = g01 == 0, g01 == 1
+                    n0, n1 = mask0.sum(), mask1.sum()
+                    if n0 < 2 or n1 < 2:
+                        return None, None, None
+                    y0, y1 = y[mask0], y[mask1]
+                    m0, m1 = y0.mean(), y1.mean()
+                    v0, v1 = y0.var(ddof=1), y1.var(ddof=1)
+                    sp2 = ((n0 - 1) * v0 + (n1 - 1) * v1) / (n0 + n1 - 2)
+                    if sp2 <= 0:
+                        return m1 - m0, None, None
+                    t = (m1 - m0) / math.sqrt(sp2 * (1.0 / n0 + 1.0 / n1))
+                    p = 2 * (1.0 - _norm_cdf(abs(t)))
+                    return m1 - m0, t, p
+
                 def _reg_slope(y, x):
                     y = np.asarray(y, dtype=float)
                     x = np.asarray(x, dtype=float)
@@ -1005,6 +1022,7 @@ with tabs[3]:
                         if p is not None:
                             sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
                             results.append([dim_col, "独生(独生 vs 非独生)", diff, t, p, sig])
+
                 if results:
                     df_sig = pd.DataFrame(
                         results,

@@ -789,22 +789,86 @@ with tabs[3]:
                     if qcols:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
-                # 8) 小维度均分
+                # 8) 小维度均分（构造式，数学保证联合回归显著，VIF≈1.4）
                 subdims_all = cfg.get("subdimensions", {})
+                med_cfg = cfg.get("mediation") or {}
+                med_A_name = med_cfg.get("A")
+                med_C_name = med_cfg.get("C")
+                med_B_name = med_cfg.get("B")
+                a_val = float(med_cfg.get("a", 0.6)) if med_cfg else 0.0
+                b_val = float(med_cfg.get("b", 0.6)) if med_cfg else 0.0
+
                 if isinstance(subdims_all, dict):
                     for big_dim, subdict in subdims_all.items():
                         if not isinstance(subdict, dict):
                             continue
-                        for sub_name, sub_qids in subdict.items():
-                            if not sub_qids:
+                        sub_names = list(subdict.keys())
+                        if not sub_names:
+                            continue
+
+                        target_vecs = []
+                        if big_dim == med_A_name:
+                            if med_C_name and f"{med_C_name}_mean" in out.columns:
+                                tc = out[f"{med_C_name}_mean"].to_numpy().astype(float)
+                                tc = (tc - tc.mean()) / (tc.std() + 1e-8)
+                                s_c = float(np.sign(a_val)) if a_val != 0 else -1.0
+                                target_vecs.append((tc, s_c, 0.5))
+                            if med_B_name and f"{med_B_name}_mean" in out.columns:
+                                tb = out[f"{med_B_name}_mean"].to_numpy().astype(float)
+                                tb = (tb - tb.mean()) / (tb.std() + 1e-8)
+                                s_b = float(np.sign(a_val * b_val)) if a_val * b_val != 0 else 1.0
+                                target_vecs.append((tb, s_b, 0.5))
+                        elif big_dim == med_C_name:
+                            if med_B_name and f"{med_B_name}_mean" in out.columns:
+                                tb = out[f"{med_B_name}_mean"].to_numpy().astype(float)
+                                tb = (tb - tb.mean()) / (tb.std() + 1e-8)
+                                s_b = float(np.sign(b_val)) if b_val != 0 else 1.0
+                                target_vecs.append((tb, s_b, 1.0))
+
+                        # Gram-Schmidt 正交噪声基底
+                        orth_bases = []
+                        for si, sub_name in enumerate(sub_names):
+                            rng_sub = np.random.default_rng(seed + abs(hash(sub_name)) % 99999)
+                            v = rng_sub.standard_normal(N)
+                            v = (v - v.mean()) / (v.std() + 1e-8)
+                            for prev in orth_bases:
+                                v = v - np.dot(v, prev) / (np.dot(prev, prev) + 1e-8) * prev
+                            v = (v - v.mean()) / (v.std() + 1e-8)
+                            orth_bases.append(v)
+
+                        # 人口学效应
+                        eff = demo_effects.get(big_dim, {})
+                        demo_delta = (float(eff.get("gender", 0) or 0) * gender01
+                                      + float(eff.get("grade", 0) or 0) * grade_num
+                                      + float(eff.get("origin", 0) or 0) * origin01
+                                      + float(eff.get("cadre", 0) or 0) * cadre01
+                                      + float(eff.get("only", 0) or 0) * only01)
+
+                        for si, sub_name in enumerate(sub_names):
+                            if not subdict[sub_name]:
                                 continue
-                            qcols = [f"Q{qid}" for qid in sub_qids if f"Q{qid}" in out.columns]
+                            qcols = [f"Q{qid}" for qid in subdict[sub_name]
+                                     if f"Q{qid}" in out.columns]
                             if not qcols:
                                 continue
                             safe_sub = re.sub(r"\W+", "", sub_name)
                             col_name = f"{big_dim}_{safe_sub}_mean"
-                            out[col_name] = out[qcols].mean(axis=1)
+                            raw_mean = out[qcols].mean(axis=1).to_numpy().astype(float)
+
+                            if target_vecs:
+                                signal = np.zeros(N)
+                                for tv, tsign, tw in target_vecs:
+                                    signal += tsign * tw * tv
+                                sub_new = (0.10 + 0.02 * si) * signal + 1.0 * orth_bases[si]
+                                sub_new = (sub_new - sub_new.mean()) / (sub_new.std() + 1e-8)
+                                sub_final = sub_new * raw_mean.std() + raw_mean.mean()
+                                sub_final = sub_final + demo_delta * item_loading
+                            else:
+                                sub_final = raw_mean + demo_delta * item_loading
+
+                            out[col_name] = sub_final
                             cols.append(col_name)
+
                 out = out[cols]
                 st.session_state.generated = out
                 st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")

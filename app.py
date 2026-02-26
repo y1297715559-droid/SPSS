@@ -739,6 +739,30 @@ with tabs[3]:
                                  + b_origin * origin01 + b_cadre * cadre01 + b_only * only01)
                         Z[d] = Z[d] + delta
 
+                # ✅ 修正：人口学效应叠加后控制A→C实际相关，防止R²虚高
+                if med:
+                    A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
+                    a_val = float(med.get("a", 0.6))
+                    cprime_val = float(med.get("cprime", 0.1))
+                    if A_med in Z.columns and C_med in Z.columns:
+                        za = Z[A_med].to_numpy().copy()
+                        za_std = (za - za.mean()) / (za.std() + 1e-8)
+                        zc = Z[C_med].to_numpy().copy()
+                        zc_std = (zc - zc.mean()) / (zc.std() + 1e-8)
+                        # 目标A-C相关：对应R²约15-25%，符合实际研究
+                        target_corr = float(np.sign(a_val)) * min(abs(a_val) + 0.05, 0.48)
+                        # 正交化C，重新按目标比例组合
+                        residual_c = zc_std - np.corrcoef(za_std, zc_std)[0, 1] * za_std
+                        residual_c = residual_c / (residual_c.std() + 1e-8)
+                        zc_new = target_corr * za_std + math.sqrt(max(1 - target_corr ** 2, 1e-6)) * residual_c
+                        Z[C_med] = pd.Series(zc_new, index=Z.index)
+                    # 确保A→B直接效应足够显著
+                    if B_med in Z.columns and A_med in Z.columns and abs(cprime_val) > 0.05:
+                        rng_b = np.random.default_rng(seed + 211)
+                        za_std2 = (Z[A_med].to_numpy() - Z[A_med].mean()) / (Z[A_med].std() + 1e-8)
+                        direct_boost = cprime_val * za_std2
+                        zb = Z[B_med].to_numpy() + direct_boost
+                        Z[B_med] = pd.Series((zb - zb.mean()) / (zb.std() + 1e-8), index=Z.index)
                 # 5) 输出 DataFrame
                 out = pd.DataFrame({"ID": np.arange(1, N + 1)})
                 if demo.get("use_Q1", False):
@@ -783,11 +807,11 @@ with tabs[3]:
                             sign = 1.0 if si % 2 == 0 else -1.0
                             outcome_w = sign * (0.35 + 0.05 * (si % 4))
                             if outcome_lat is not None:
-                                sub_lat = (0.40 * parent_lat
+                                sub_lat = (0.25 * parent_lat
                                            + outcome_w * outcome_lat
-                                           + 0.30 * unique)
+                                           + 0.45 * unique)
                             else:
-                                sub_lat = 0.70 * parent_lat + 0.30 * unique
+                                sub_lat = 0.55 * parent_lat + 0.30 * unique
                             sub_lat = (sub_lat - sub_lat.mean()) / (sub_lat.std() + 1e-8)
                             for qid in subdict[sub_name]:
                                 qid_to_sublatent[qid] = sub_lat

@@ -244,6 +244,21 @@ with tabs[1]:
         min_qid = min(all_qids)
         max_qid = max(all_qids)
 
+        # 显示配置的 JSON 数据
+        st.markdown("### 配置 JSON 数据")
+        # 格式化 config 为 JSON 字符串
+        config_json = json.dumps(st.session_state.config, indent=2, ensure_ascii=False)
+        # 让用户编辑 JSON
+        edited_config_json = st.text_area("编辑 JSON 配置", config_json, height=400)
+
+        # 更新配置（确保输入的是合法的 JSON 格式）
+        try:
+            if edited_config_json != config_json:
+                st.session_state.config = json.loads(edited_config_json)
+                st.success("配置已更新！")
+        except json.JSONDecodeError as e:
+            st.error(f"无效的 JSON 格式：{e}")
+
         # 初始化默认 config
         if not st.session_state.config:
             # 默认起始题号：如果有第 6 题，就从 6；否则从最小题号

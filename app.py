@@ -233,6 +233,7 @@ with tabs[0]:
         ).sort_values("qid")
         st.dataframe(dfq, use_container_width=True)
 # ---------- Tab 2: 维度、人 口学、题目参数 ----------
+# ---------- Tab 2: 维度、人口学、题目参数 ----------
 with tabs[1]:
     st.subheader("配置：维度归属、反向题、人口学 & 题目分布")
     qs = st.session_state.questions
@@ -257,19 +258,17 @@ with tabs[1]:
                 },
                 "subdimensions": {},
                 "demo": {
-                    # 是否启用
                     "use_Q1": True,
                     "use_Q2": True,
                     "use_Q3": True,
                     "use_Q4": True,
                     "use_Q5": True,
-                    # 百分比设置
-                    "Q1_perc": [50.0, 50.0],  # 男, 女
+                    "Q1_perc": [50.0, 50.0],
                     "grade_levels": 3,
-                    "Q2_perc": [35.0, 40.0, 25.0],  # 年级
-                    "Q3_perc": [55.0, 45.0],  # 城镇, 农村
-                    "Q4_perc": [28.0, 72.0],  # 班干, 非班干
-                    "Q5_perc": [38.0, 62.0],  # 独生, 非独生
+                    "Q2_perc": [35.0, 40.0, 25.0],
+                    "Q3_perc": [55.0, 45.0],
+                    "Q4_perc": [28.0, 72.0],
+                    "Q5_perc": [38.0, 62.0]
                 },
                 "item_params": {
                     "mean": 3.60,
@@ -596,18 +595,22 @@ with tabs[1]:
                 try:
                     if edited_config_json != config_json:
                         new_config = json.loads(edited_config_json)
-                        st.session_state.config = new_config
-                        st.success("JSON 配置已应用！")
-                        st.rerun()
-                except json.JSONDecodeError as e:
-                    st.error(f"无效的 JSON 格式：{e}")
-                except Exception as e:
-                    st.error(f"应用配置时出错：{e}")
-        
-        with col2:
-            # 导出配置按钮
-            if st.button("导出配置为 JSON 文件", use_container_width=True):
-                st
+                        
+                        # 验证必要的字段
+                        required_fields = ["N", "seed", "scale_start_qid", "dimensions", "demo", "item_params"]
+                        for field in required_fields:
+                            if field not in new_config:
+                                st.error(f"配置缺少必要字段: {field}")
+                                return
+                        
+                        # 验证维度配置
+                        if not isinstance(new_config["dimensions"], dict) or not new_config["dimensions"]:
+                            st.error("维度配置不能为空")
+                            return
+                        
+                        # 验证人口学配置
+                        demo_fields = ["use_Q1", "use_Q2", "use_Q3", "use_Q4", "use_Q5"]
+                        for field in demo
 # ---------- Tab 3: 关系约束 ----------
 with tabs[2]:
     st.subheader("关系约束：各人口学差异・维度相关矩阵・中介模型")

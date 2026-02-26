@@ -763,21 +763,58 @@ with tabs[3]:
                 item_loading = float(item_params.get("loading", 0.8))
                 item_noise = float(item_params.get("noise", 0.75))
 
+                # 预计算小维度独立潜变量（解决多重共线性）
+                qid_to_sublatent = {}
+                med_B = cfg.get("mediation", {}).get("B", None)
+                subdims_all_gen = cfg.get("subdimensions", {})
+                if isinstance(subdims_all_gen, dict):
+                    for big_dim, subdict in subdims_all_gen.items():
+                        if not isinstance(subdict, dict) or big_dim not in Z.columns:
+                            continue
+                        parent_lat = Z[big_dim].to_numpy()
+                        outcome_lat = (Z[med_B].to_numpy()
+                                       if (med_B and med_B in Z.columns and med_B != big_dim)
+                                       else None)
+                        for sub_name, sub_qids in subdict.items():
+                            rng_sub = np.random.default_rng(seed + abs(hash(sub_name)) % 9999)
+                            unique = rng_sub.standard_normal(N)
+                            unique = unique / (unique.std() + 1e-8)
+                            if outcome_lat is not None:
+                                sub_lat = 0.65 * parent_lat + 0.25 * outcome_lat + 0.10 * unique
+                            else:
+                                sub_lat = 0.85 * parent_lat + 0.15 * unique
+                            sub_lat = (sub_lat - sub_lat.mean()) / (sub_lat.std() + 1e-8)
+                            for qid in sub_qids:
+                                qid_to_sublatent[qid] = sub_lat
+
                 for d in dim_names:
                     qids = sorted([qid for qid, dd in qid_to_dim.items()
                                    if dd == d and qid >= scale_start_qid])
                     if not qids:
                         continue
-                    disc = latent_to_items(
-                        Z[d].to_numpy(), len(qids),
-                        mean=item_mean, loading=item_loading, noise=item_noise,
-                        seed=seed + 13 + (hash(d) % 1000),
-                    )
-                    for idx, qid in enumerate(qids):
-                        x = disc[:, idx]
-                        if qid in rev:
-                            x = 6 - x
-                        out[f"Q{qid}"] = x
+                    seen = set()
+                    for qid in qids:
+                        if qid in seen:
+                            continue
+                        if qid in qid_to_sublatent:
+                            lat = qid_to_sublatent[qid]
+                            grp = [q for q in qids if q not in seen
+                                   and qid_to_sublatent.get(q) is lat]
+                        else:
+                            lat = Z[d].to_numpy()
+                            grp = [q for q in qids if q not in seen
+                                   and q not in qid_to_sublatent]
+                        disc = latent_to_items(
+                            lat, len(grp),
+                            mean=item_mean, loading=item_loading, noise=item_noise,
+                            seed=seed + 13 + (hash(d) % 1000) + (hash(qid) % 500),
+                        )
+                        for idx, q in enumerate(grp):
+                            x = disc[:, idx]
+                            if q in rev:
+                                x = 6 - x
+                            out[f"Q{q}"] = x
+                            seen.add(q)
 
                 # 7) 均分
                 cols = ["ID"]

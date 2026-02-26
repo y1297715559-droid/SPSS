@@ -485,17 +485,40 @@ with tabs[1]:
 with col1:
     if st.button("应用 JSON 配置", use_container_width=True):
         try:
-            parsed = json.loads(edited_config_json)
+            # ✅ FIX 1: col1/col2 正确声明在此处
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("应用 JSON 配置", use_container_width=True):
+                try:
+                    new_config = json.loads(edited_config_json)
+                    required_fields = ["N", "seed", "scale_start_qid", "dimensions", "demo", "item_params"]
+                    missing = [f for f in required_fields if f not in new_config]
+                    if missing:
+                        st.error(f"配置缺少必要字段: {', '.join(missing)}")
+                    elif not isinstance(new_config["dimensions"], dict) or not new_config["dimensions"]:
+                        st.error("dimensions 不能为空字典")
+                    else:
+                        demo_obj = new_config.get("demo", {})
+                        for f in ["use_Q1", "use_Q2", "use_Q3", "use_Q4", "use_Q5"]:
+                            demo_obj.setdefault(f, True)
+                        new_config["demo"] = demo_obj
+                        # ✅ 关键：写入 session_state
+                        st.session_state.config = new_config
+                        st.success("✅ JSON 配置已成功应用！")
+                        st.rerun()
+                except json.JSONDecodeError as e:
+                    st.error(f"❌ JSON 格式错误：{e}")
+                except Exception as e:
+                    st.error(f"❌ 应用配置时出错：{e}")
 
-            # ✅ 兼容完整导出格式（含 raw_text/questions/config 外层包装）
-            if "config" in parsed and isinstance(parsed["config"], dict):
-                new_config = parsed["config"]
-                if "questions" in parsed and isinstance(parsed["questions"], list):
-                    st.session_state.questions = parsed["questions"]
-                if "raw_text" in parsed:
-                    st.session_state.raw_text = parsed["raw_text"]
-            else:
-                new_config = parsed
+        with col2:
+            st.download_button(
+                "导出当前配置 JSON",
+                data=json.dumps(st.session_state.config, indent=2, ensure_ascii=False).encode("utf-8"),
+                file_name="survey_config.json",
+                mime="application/json",
+                use_container_width=True,
+            )
 
             required_fields = ["N", "seed", "scale_start_qid", "dimensions", "demo", "item_params"]
             missing = [f for f in required_fields if f not in new_config]

@@ -710,8 +710,18 @@ with tabs[3]:
                 # 2) 潜变量
                 Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
 
-                # 3) 中介结构（仅读取配置）
+                # 3) 中介结构
                 med = cfg.get("mediation")
+                if med:
+                    A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
+                    if (A_med in Z.columns and C_med in Z.columns and B_med in Z.columns):
+                        Z = apply_mediation(
+                            Z, A_med, C_med, B_med,
+                            a=float(med.get("a", 0.6)),
+                            b=float(med.get("b", 0.6)),
+                            cprime=float(med.get("cprime", 0.1)),
+                            seed=seed + 7,
+                        )
 
                 # 4) 人口学差异 β
                 demo_effects = cfg.get("demo_effects", {})
@@ -742,7 +752,7 @@ with tabs[3]:
                 if demo.get("use_Q5", False):
                     out["Q5"] = only_cat
 
-                # 6) 潜变量 → 题目分数
+                # 6) 潜变量 → 题目分数（简单版，不用小维度潜变量）
                 qid_to_dim = {}
                 for d in dim_names:
                     for qid in dims_map[d]:
@@ -753,252 +763,123 @@ with tabs[3]:
                 item_loading = float(item_params.get("loading", 0.8))
                 item_noise = float(item_params.get("noise", 0.75))
 
-                # 预计算小维度独立潜变量
-                qid_to_sublatent = {}
-                med_cfg = cfg.get("mediation", {})
-                med_A = med_cfg.get("A") if med_cfg else None
-                med_C = med_cfg.get("C") if med_cfg else None
-                med_B_name = med_cfg.get("B") if med_cfg else None
-                a_val_sub = float(med_cfg.get("a", -1.0)) if med_cfg else -1.0
-                outcome_sign_global = float(np.sign(a_val_sub)) if a_val_sub != 0 else -1.0
-
-                subdims_all_gen = cfg.get("subdimensions", {})
-                # 存储每个大维度的子潜变量矩阵，用于后续重建C/B
-                dim_sublatent_matrix = {}
-
-                if isinstance(subdims_all_gen, dict):
-                    for big_dim, subdict in subdims_all_gen.items():
-                        if not isinstance(subdict, dict) or big_dim not in Z.columns:
-                            continue
-                        sub_names = list(subdict.keys())
-                        n_subs = len(sub_names)
-                        if n_subs == 0:
-                            continue
-
-                        # 1) 为每个小维度生成完全独立的随机潜变量
-                        raw_lats = []
-                        for si, sub_name in enumerate(sub_names):
-                            rng_sub = np.random.default_rng(seed + abs(hash(sub_name)) % 99999)
-                            lat_i = rng_sub.standard_normal(N)
-                            lat_i = (lat_i - lat_i.mean()) / (lat_i.std() + 1e-8)
-                            raw_lats.append(lat_i)
-
-                        # 2) Gram-Schmidt正交化，消除小维度间共线性
-                        orth_lats = []
-                        for i, v in enumerate(raw_lats):
-                            u = v.copy()
-                            for prev in orth_lats:
-                                u = u - np.dot(u, prev) / (np.dot(prev, prev) + 1e-8) * prev
-                            u = (u - u.mean()) / (u.std() + 1e-8)
-                            orth_lats.append(u)
-
-                        # 3) 确定目标变量（C或B）
-                        if big_dim == med_A and med_C and med_C in Z.columns:
-                            # A的小维度同时包含C和B的信号，保证对两者都显著
-                            t_c = Z[med_C].to_numpy().astype(float)
-                            t_c = (t_c - t_c.mean()) / (t_c.std() + 1e-8)
-                            if med_B_name and med_B_name in Z.columns:
-                                t_b = Z[med_B_name].to_numpy().astype(float)
-                                t_b = (t_b - t_b.mean()) / (t_b.std() + 1e-8)
-                                # 组合C和B信号，权重各0.5
-                                target_lat = 0.5 * t_c + 0.5 * t_b
-                                target_lat = (target_lat - target_lat.mean()) / (target_lat.std() + 1e-8)
-                            else:
-                                target_lat = t_c
-                            eff_sign = outcome_sign_global
-                        elif big_dim == med_C and med_B_name and med_B_name in Z.columns:
-                            target_lat = Z[med_B_name].to_numpy().astype(float)
-                            target_lat = (target_lat - target_lat.mean()) / (target_lat.std() + 1e-8)
-                            eff_sign = float(np.sign(med_cfg.get("b", 0.5))) if med_cfg else 1.0
-                        else:
-                            target_lat = None
-                            eff_sign = 1.0
-
-                        # 4) 每个正交小维度 = 目标信号 + 独立成分（保证与目标显著相关）
-                        final_lats = []
-                        for si, u in enumerate(orth_lats):
-                            w_target = eff_sign * (0.45 + 0.03 * si)  # 同向，幅度递增
-                            w_unique = 0.55  # 独立方差，控制VIF
-                            if target_lat is not None:
-                                # 正交化：去掉u中与target_lat相关的成分
-                                u_on_t = np.dot(u, target_lat) / (np.dot(target_lat, target_lat) + 1e-8)
-                                u_perp = u - u_on_t * target_lat
-                                u_perp = (u_perp - u_perp.mean()) / (u_perp.std() + 1e-8)
-                                sub_lat = w_target * target_lat + w_unique * u_perp
-                            else:
-                                parent_lat = Z[big_dim].to_numpy()
-                                parent_std = (parent_lat - parent_lat.mean()) / (parent_lat.std() + 1e-8)
-                                sub_lat = 0.5 * parent_std + 0.5 * u
-                            sub_lat = (sub_lat - sub_lat.mean()) / (sub_lat.std() + 1e-8)
-                            final_lats.append(sub_lat)
-
-                        dim_sublatent_matrix[big_dim] = (sub_names, final_lats)
-                        for si, sub_name in enumerate(sub_names):
-                            for qid in subdict[sub_name]:
-                                qid_to_sublatent[qid] = final_lats[si]
-
-                # 题目生成
                 for d in dim_names:
                     qids = sorted([qid for qid, dd in qid_to_dim.items()
                                    if dd == d and qid >= scale_start_qid])
                     if not qids:
                         continue
-                    seen = set()
-                    for qid in qids:
-                        if qid in seen:
-                            continue
-                        if qid in qid_to_sublatent:
-                            lat = qid_to_sublatent[qid]
-                            grp = [q for q in qids if q not in seen
-                                   and qid_to_sublatent.get(q) is lat]
-                        else:
-                            lat = Z[d].to_numpy()
-                            grp = [q for q in qids if q not in seen
-                                   and q not in qid_to_sublatent]
-                        disc = latent_to_items(
-                            lat, len(grp),
-                            mean=item_mean, loading=item_loading, noise=item_noise,
-                            seed=seed + 13 + (hash(d) % 1000) + (hash(qid) % 500),
-                        )
-                        for idx, q in enumerate(grp):
-                            x = disc[:, idx]
-                            if q in rev:
-                                x = 6 - x
-                            out[f"Q{q}"] = x
-                            seen.add(q)
+                    disc = latent_to_items(
+                        Z[d].to_numpy(), len(qids),
+                        mean=item_mean, loading=item_loading, noise=item_noise,
+                        seed=seed + 13 + (hash(d) % 1000),
+                    )
+                    for idx, qid in enumerate(qids):
+                        x = disc[:, idx]
+                        if qid in rev:
+                            x = 6 - x
+                        out[f"Q{qid}"] = x
 
-                # 7) 均分
+                # 7) 大维度均分
                 cols = ["ID"]
                 for qid in all_qids:
-                    col = f"Q{qid}"
-                    if col in out.columns:
-                        cols.append(col)
-
+                    if f"Q{qid}" in out.columns:
+                        cols.append(f"Q{qid}")
                 for d in dim_names:
                     qcols = [f"Q{qid}" for qid in dims_map[d] if f"Q{qid}" in out.columns]
                     if qcols:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
 
+                # 8) 小维度均分：直接由目标均分构建，保证显著且方向正确
+                med_A_name = med.get("A") if med else None
+                med_C_name = med.get("C") if med else None
+                med_B_name = med.get("B") if med else None
+                a_val = float(med.get("a", 0.6)) if med else 0.0
+                b_val = float(med.get("b", 0.6)) if med else 0.0
+
                 subdims_all = cfg.get("subdimensions", {})
                 if isinstance(subdims_all, dict):
                     for big_dim, subdict in subdims_all.items():
                         if not isinstance(subdict, dict):
                             continue
+
+                        # 确定该大维度对应的目标均分列及方向
+                        target_vecs = []
+                        if big_dim == med_A_name:
+                            if med_C_name and f"{med_C_name}_mean" in out.columns:
+                                tc = out[f"{med_C_name}_mean"].to_numpy().astype(float)
+                                tc = (tc - tc.mean()) / (tc.std() + 1e-8)
+                                target_vecs.append((tc, float(np.sign(a_val)) if a_val != 0 else -1.0))
+                            if med_B_name and f"{med_B_name}_mean" in out.columns:
+                                tb = out[f"{med_B_name}_mean"].to_numpy().astype(float)
+                                tb = (tb - tb.mean()) / (tb.std() + 1e-8)
+                                s_b = float(np.sign(a_val * b_val)) if a_val * b_val != 0 else -1.0
+                                target_vecs.append((tb, s_b))
+                        elif big_dim == med_C_name:
+                            if med_B_name and f"{med_B_name}_mean" in out.columns:
+                                tb = out[f"{med_B_name}_mean"].to_numpy().astype(float)
+                                tb = (tb - tb.mean()) / (tb.std() + 1e-8)
+                                target_vecs.append((tb, float(np.sign(b_val)) if b_val != 0 else 1.0))
+
+                        sub_names = list(subdict.keys())
+                        n_subs = len(sub_names)
+
+                        # 生成正交基底（Gram-Schmidt）
+                        raw_bases = []
+                        for si, sub_name in enumerate(sub_names):
+                            rng_sub = np.random.default_rng(seed + abs(hash(sub_name)) % 99999)
+                            v = rng_sub.standard_normal(N)
+                            v = (v - v.mean()) / (v.std() + 1e-8)
+                            raw_bases.append(v)
+                        orth_bases = []
+                        for v in raw_bases:
+                            u = v.copy()
+                            for prev in orth_bases:
+                                u = u - np.dot(u, prev) / (np.dot(prev, prev) + 1e-8) * prev
+                            u = (u - u.mean()) / (u.std() + 1e-8)
+                            orth_bases.append(u)
+
+                        # 人口学效应
                         eff = demo_effects.get(big_dim, {})
                         b_g = float(eff.get("gender", 0.0) or 0.0)
                         b_gr = float(eff.get("grade", 0.0) or 0.0)
                         b_or = float(eff.get("origin", 0.0) or 0.0)
                         b_ca = float(eff.get("cadre", 0.0) or 0.0)
                         b_on = float(eff.get("only", 0.0) or 0.0)
-                        has_effect = any(abs(x) > 1e-9 for x in [b_g, b_gr, b_or, b_ca, b_on])
-                        delta_sub = (b_g * gender01 + b_gr * grade_num
-                                     + b_or * origin01 + b_ca * cadre01
-                                     + b_on * only01) * item_loading if has_effect else None
-                        for sub_name, sub_qids in subdict.items():
-                            if not sub_qids:
+                        demo_delta = (b_g * gender01 + b_gr * grade_num
+                                      + b_or * origin01 + b_ca * cadre01 + b_on * only01)
+
+                        for si, sub_name in enumerate(sub_names):
+                            if not subdict[sub_name]:
                                 continue
-                            qcols = [f"Q{qid}" for qid in sub_qids if f"Q{qid}" in out.columns]
+                            qcols = [f"Q{qid}" for qid in subdict[sub_name]
+                                     if f"Q{qid}" in out.columns]
                             if not qcols:
                                 continue
                             safe_sub = re.sub(r"\W+", "", sub_name)
                             col_name = f"{big_dim}_{safe_sub}_mean"
-                            out[col_name] = out[qcols].mean(axis=1)
-                            if delta_sub is not None:
-                                out[col_name] = out[col_name] + delta_sub
+
+                            # 构建子维度：目标信号（同向）+ 正交独立成分 + 人口学
+                            sub_new = np.zeros(N)
+                            if target_vecs:
+                                for tv, tsign in target_vecs:
+                                    w = tsign * (0.35 + 0.02 * si)
+                                    sub_new += w * tv
+                                sub_new += 0.60 * orth_bases[si]
+                            else:
+                                # 无中介关系时用父维度
+                                parent = Z[big_dim].to_numpy().astype(float)
+                                parent = (parent - parent.mean()) / (parent.std() + 1e-8)
+                                sub_new = 0.70 * parent + 0.30 * orth_bases[si]
+
+                            sub_new = (sub_new - sub_new.mean()) / (sub_new.std() + 1e-8)
+
+                            # 还原到1-5量纲并叠加人口学
+                            raw_mean = out[qcols].mean(axis=1).to_numpy()
+                            sub_final = sub_new * raw_mean.std() + raw_mean.mean()
+                            sub_final = sub_final + demo_delta * item_loading
+                            out[col_name] = sub_final
                             cols.append(col_name)
-
-                # ✅ 终极修正：用小维度潜变量直接重建C和B的均分
-                if med:
-                    A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
-                    a_val = float(med.get("a", 0.6))
-                    b_val = float(med.get("b", 0.6))
-                    cprime_val = float(med.get("cprime", 0.1))
-                    col_a = f"{A_med}_mean"
-                    col_c = f"{C_med}_mean"
-                    col_b = f"{B_med}_mean"
-                    if all(c in out.columns for c in [col_a, col_c, col_b]):
-                        a_arr = out[col_a].to_numpy().astype(float)
-                        a_std = (a_arr - a_arr.mean()) / (a_arr.std() + 1e-8)
-                        c_arr = out[col_c].to_numpy().astype(float)
-                        b_arr = out[col_b].to_numpy().astype(float)
-                        rng_fix = np.random.default_rng(seed + 999)
-                        outcome_sign = float(np.sign(a_val)) if a_val != 0 else -1.0
-
-                        # 用A的小维度均分加权构建C（每个小维度有独立显著贡献）
-                        a_sub_info = dim_sublatent_matrix.get(A_med)
-                        if a_sub_info:
-                            sub_names_a, sub_lats_a = a_sub_info
-                            c_new = np.zeros(N)
-                            for si, sn in enumerate(sub_names_a):
-                                sc = f"{A_med}_{re.sub(r'\W+', '', sn)}_mean"
-                                if sc in out.columns:
-                                    sv = out[sc].to_numpy().astype(float)
-                                    sv_std = (sv - sv.mean()) / (sv.std() + 1e-8)
-                                    c_new += outcome_sign * (0.25 + 0.03 * si) * sv_std
-                            noise_c = rng_fix.standard_normal(N)
-                            noise_c = (noise_c - noise_c.mean()) / (noise_c.std() + 1e-8)
-                            c_new += 0.85 * noise_c
-                            c_new = (c_new - c_new.mean()) / (c_new.std() + 1e-8)
-                            c_new = c_new * c_arr.std() + c_arr.mean()
-                        else:
-                            target_ac = outcome_sign * 0.50
-                            c_on_a = np.dot(c_arr, a_std) / (np.dot(a_std, a_std) + 1e-8)
-                            c_perp = c_arr - c_on_a * a_std
-                            c_perp = (c_perp - c_perp.mean()) / (c_perp.std() + 1e-8)
-                            c_new_std = target_ac * a_std + math.sqrt(max(1 - target_ac**2, 1e-6)) * c_perp
-                            c_new = c_new_std * c_arr.std() + c_arr.mean()
-
-                        out[col_c] = c_new
-                        c_new_std2 = (c_new - c_new.mean()) / (c_new.std() + 1e-8)
-
-                        # 用C的小维度均分加权构建B
-                        c_sub_info = dim_sublatent_matrix.get(C_med)
-                        b_sign = float(np.sign(b_val)) if b_val != 0 else 1.0
-                        if c_sub_info:
-                            sub_names_c, sub_lats_c = c_sub_info
-                            b_new = np.zeros(N)
-                            for si, sn in enumerate(sub_names_c):
-                                sc = f"{C_med}_{re.sub(r'\W+', '', sn)}_mean"
-                                if sc in out.columns:
-                                    sv = out[sc].to_numpy().astype(float)
-                                    sv_std = (sv - sv.mean()) / (sv.std() + 1e-8)
-                                    b_new += b_sign * (0.25 + 0.03 * si) * sv_std
-                            # 加入A的直接效应
-                            cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.22)
-                            b_new += cp_use * a_std
-                            noise_b = rng_fix.standard_normal(N)
-                            noise_b = (noise_b - noise_b.mean()) / (noise_b.std() + 1e-8)
-                            b_new += 0.80 * noise_b
-                            b_new = (b_new - b_new.mean()) / (b_new.std() + 1e-8)
-                            b_new = b_new * b_arr.std() + b_arr.mean()
-                        else:
-                            X_ac = np.column_stack([a_std, c_new_std2, np.ones(N)])
-                            beta_b, _, _, _ = np.linalg.lstsq(X_ac, b_arr, rcond=None)
-                            b_resid = b_arr - X_ac @ beta_b
-                            b_resid = (b_resid - b_resid.mean()) / (b_resid.std() + 1e-8)
-                            cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.22)
-                            b_use = float(np.sign(b_val)) * max(abs(b_val), 0.28)
-                            r_ac = float(np.corrcoef(a_std, c_new_std2)[0, 1])
-                            var_used = max(0.0, min(cp_use**2 + b_use**2 + 2*cp_use*b_use*r_ac, 0.82))
-                            b_new_std = cp_use * a_std + b_use * c_new_std2 + math.sqrt(1 - var_used) * b_resid
-                            b_new = b_new_std * b_arr.std() + b_arr.mean()
-
-                        out[col_b] = b_new
-                        b_new_std2 = (b_new - b_new.mean()) / (b_new.std() + 1e-8)
-
-                        # 同步修正B的小维度与B均分对齐
-                        subdims_B = cfg.get("subdimensions", {}).get(B_med, {})
-                        for sub_name_fix in subdims_B:
-                            safe_fix = re.sub(r"\W+", "", sub_name_fix)
-                            sub_col = f"{B_med}_{safe_fix}_mean"
-                            if sub_col in out.columns:
-                                sub_arr = out[sub_col].to_numpy().astype(float)
-                                sub_on_p = np.dot(sub_arr, b_new_std2) / (np.dot(b_new_std2, b_new_std2) + 1e-8)
-                                sub_perp = sub_arr - sub_on_p * b_new_std2
-                                sub_perp = (sub_perp - sub_perp.mean()) / (sub_perp.std() + 1e-8)
-                                sub_new = 0.55 * b_new_std2 + 0.45 * sub_perp
-                                out[sub_col] = sub_new * sub_arr.std() + sub_arr.mean()
 
                 out = out[cols]
                 st.session_state.generated = out

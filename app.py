@@ -713,77 +713,58 @@ with tabs[3]:
                 # 3) 中介结构（仅读取配置）
                 med = cfg.get("mediation")
 
-                # 4) 人口学差异 β —— 预先计算所有delta，C和B单独处理
+                # 4) 人口学差异 β —— 所有维度包括C和B全部先叠加完
                 demo_effects = cfg.get("demo_effects", {})
-                demo_deltas = {}
                 for d in dim_names:
                     eff = demo_effects.get(d, {})
                     if not isinstance(eff, dict):
                         eff = {}
-                    demo_deltas[d] = (
-                        float(eff.get("gender", 0.0) or 0.0) * gender01
-                        + float(eff.get("grade", 0.0) or 0.0) * grade_num
-                        + float(eff.get("origin", 0.0) or 0.0) * origin01
-                        + float(eff.get("cadre", 0.0) or 0.0) * cadre01
-                        + float(eff.get("only", 0.0) or 0.0) * only01
-                    )
-
-                med_A = med.get("A") if med else None
-                med_C = med.get("C") if med else None
-                med_B = med.get("B") if med else None
-                is_valid_med = (med and med_A and med_C and med_B
-                                and med_A != med_C and med_A != med_B
-                                and med_A in Z.columns and med_C in Z.columns and med_B in Z.columns)
-                med_rebuild = {med_C, med_B} if is_valid_med else set()
-
-                # 对所有维度叠加人口学效应（C和B暂跳过，后面单独处理）
-                for d in dim_names:
-                    if d in med_rebuild:
-                        continue
-                    delta = demo_deltas.get(d, 0)
-                    if np.any(np.asarray(delta) != 0):
+                    b_gender = float(eff.get("gender", 0.0) or 0.0)
+                    b_grade = float(eff.get("grade", 0.0) or 0.0)
+                    b_origin = float(eff.get("origin", 0.0) or 0.0)
+                    b_cadre = float(eff.get("cadre", 0.0) or 0.0)
+                    b_only = float(eff.get("only", 0.0) or 0.0)
+                    if any(abs(x) > 0 for x in [b_gender, b_grade, b_origin, b_cadre, b_only]):
+                        delta = (b_gender * gender01 + b_grade * grade_num
+                                 + b_origin * origin01 + b_cadre * cadre01 + b_only * only01)
                         Z[d] = Z[d] + delta
 
-                # ✅ 重建C和B：用A的结构残差（去掉人口学）建路径，各自独立加人口学
-                if is_valid_med:
-                    rng_fix = np.random.default_rng(seed + 999)
+                # ✅ 终极修正：用最终A（已含人口学）直接构建C和B
+                # 原理：corr(A, target_ac*A_std + noise) = target_ac，精确可控
+                if med:
+                    A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
                     a_val = float(med.get("a", 0.6))
                     b_val = float(med.get("b", 0.6))
                     cprime_val = float(med.get("cprime", 0.1))
+                    if (A_med in Z.columns and C_med in Z.columns and B_med in Z.columns
+                            and A_med != C_med and A_med != B_med):
+                        rng_fix = np.random.default_rng(seed + 999)
 
-                    # A的结构成分 = A当前值 - A的人口学偏移
-                    za_full = Z[med_A].to_numpy().astype(float)
-                    za_struct = za_full - np.asarray(demo_deltas.get(med_A, 0), dtype=float)
-                    za_struct = (za_struct - za_struct.mean()) / (za_struct.std() + 1e-8)
+                        # 取最终A（含人口学）标准化
+                        za_final = Z[A_med].to_numpy().astype(float)
+                        za_std = (za_final - za_final.mean()) / (za_final.std() + 1e-8)
 
-                    # 目标A-C结构相关（R²约8~18%，符合实际）
-                    target_ac = float(np.sign(a_val)) * min(abs(a_val) * 0.5, 0.38)
-                    e_c = rng_fix.standard_normal(N)
-                    e_c = (e_c - e_c.mean()) / (e_c.std() + 1e-8)
-                    zc_struct = (target_ac * za_struct
-                                 + math.sqrt(max(1 - target_ac ** 2, 1e-6)) * e_c)
-                    zc_struct = (zc_struct - zc_struct.mean()) / (zc_struct.std() + 1e-8)
+                        # 精确控制A-C相关 = target_ac（R²约10~16%）
+                        target_ac = float(np.sign(a_val)) * 0.35
+                        e_c = rng_fix.standard_normal(N)
+                        e_c = (e_c - e_c.mean()) / (e_c.std() + 1e-8)
+                        zc_new = (target_ac * za_std
+                                  + math.sqrt(max(1 - target_ac ** 2, 1e-6)) * e_c)
 
-                    # C = 结构部分 + C自己的人口学效应（与A无关）
-                    Z[med_C] = pd.Series(
-                        zc_struct + np.asarray(demo_deltas.get(med_C, 0), dtype=float),
-                        index=Z.index)
+                        # 精确控制A-B路径（cprime强制>=0.20保证显著）
+                        cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.20)
+                        b_use = float(np.sign(b_val)) * max(abs(b_val), 0.25)
+                        zc_std = (zc_new - zc_new.mean()) / (zc_new.std() + 1e-8)
+                        e_b = rng_fix.standard_normal(N)
+                        e_b = (e_b - e_b.mean()) / (e_b.std() + 1e-8)
+                        var_used = max(0.0, min(
+                            cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac, 0.88))
+                        zb_new = (cp_use * za_std + b_use * zc_std
+                                  + math.sqrt(1 - var_used) * e_b)
 
-                    # 重建B：A直接效应 + C间接效应，cprime强制≥0.20
-                    cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.20)
-                    b_use = float(np.sign(b_val)) * max(abs(b_val), 0.25)
-                    e_b = rng_fix.standard_normal(N)
-                    e_b = (e_b - e_b.mean()) / (e_b.std() + 1e-8)
-                    var_used = max(0.0, min(
-                        cp_use ** 2 + b_use ** 2 + 2 * cp_use * b_use * target_ac, 0.88))
-                    zb_struct = (cp_use * za_struct + b_use * zc_struct
-                                 + math.sqrt(1 - var_used) * e_b)
-                    zb_struct = (zb_struct - zb_struct.mean()) / (zb_struct.std() + 1e-8)
-
-                    # B = 结构部分 + B自己的人口学效应（与A无关）
-                    Z[med_B] = pd.Series(
-                        zb_struct + np.asarray(demo_deltas.get(med_B, 0), dtype=float),
-                        index=Z.index)
+                        # 直接写入，不再叠加任何人口学效应
+                        Z[C_med] = pd.Series(zc_new, index=Z.index)
+                        Z[B_med] = pd.Series(zb_new, index=Z.index)
                 # 5) 输出 DataFrame
                 out = pd.DataFrame({"ID": np.arange(1, N + 1)})
                 if demo.get("use_Q1", False):

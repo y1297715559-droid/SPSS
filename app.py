@@ -710,18 +710,8 @@ with tabs[3]:
                 # 2) 潜变量
                 Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
 
-                # 3) 中介结构
+                # 3) 中介结构（仅读取配置，实际重建在步骤4之后统一处理）
                 med = cfg.get("mediation")
-                if med:
-                    A_med, C_med, B_med = med["A"], med["C"], med["B"]
-                    if A_med in Z.columns and C_med in Z.columns and B_med in Z.columns:
-                        Z = apply_mediation(
-                            Z, A_med, C_med, B_med,
-                            a=float(med.get("a", 0.6)),
-                            b=float(med.get("b", 0.6)),
-                            cprime=float(med.get("cprime", 0.1)),
-                            seed=seed + 7,
-                        )
 
                 # 4) 人口学差异 β
                 demo_effects = cfg.get("demo_effects", {})
@@ -739,30 +729,53 @@ with tabs[3]:
                                  + b_origin * origin01 + b_cadre * cadre01 + b_only * only01)
                         Z[d] = Z[d] + delta
 
-                # ✅ 修正：人口学效应叠加后控制A→C实际相关，防止R²虚高
+                # ✅ 强制修正：人口学叠加后重建C和B，控制实际相关结构
                 if med:
                     A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
                     a_val = float(med.get("a", 0.6))
+                    b_val = float(med.get("b", 0.6))
                     cprime_val = float(med.get("cprime", 0.1))
-                    if A_med in Z.columns and C_med in Z.columns:
-                        za = Z[A_med].to_numpy().copy()
-                        za_std = (za - za.mean()) / (za.std() + 1e-8)
-                        zc = Z[C_med].to_numpy().copy()
-                        zc_std = (zc - zc.mean()) / (zc.std() + 1e-8)
-                        # 目标A-C相关：对应R²约15-25%，符合实际研究
-                        target_corr = float(np.sign(a_val)) * min(abs(a_val) + 0.05, 0.48)
-                        # 正交化C，重新按目标比例组合
-                        residual_c = zc_std - np.corrcoef(za_std, zc_std)[0, 1] * za_std
-                        residual_c = residual_c / (residual_c.std() + 1e-8)
-                        zc_new = target_corr * za_std + math.sqrt(max(1 - target_corr ** 2, 1e-6)) * residual_c
-                        Z[C_med] = pd.Series(zc_new, index=Z.index)
-                    # 确保A→B直接效应足够显著
-                    if B_med in Z.columns and A_med in Z.columns and abs(cprime_val) > 0.05:
-                        rng_b = np.random.default_rng(seed + 211)
-                        za_std2 = (Z[A_med].to_numpy() - Z[A_med].mean()) / (Z[A_med].std() + 1e-8)
-                        direct_boost = cprime_val * za_std2
-                        zb = Z[B_med].to_numpy() + direct_boost
-                        Z[B_med] = pd.Series((zb - zb.mean()) / (zb.std() + 1e-8), index=Z.index)
+                    if (A_med in Z.columns and C_med in Z.columns and B_med in Z.columns
+                            and A_med != C_med and A_med != B_med):
+                        rng_fix = np.random.default_rng(seed + 999)
+
+                        # 标准化A
+                        za = Z[A_med].to_numpy().astype(float)
+                        za = (za - za.mean()) / (za.std() + 1e-8)
+
+                        # 目标A-C相关限制在0.35~0.45（R²约12~20%）
+                        target_ac = float(np.sign(a_val)) * min(abs(a_val) * 0.6, 0.42)
+                        e_c = rng_fix.standard_normal(N)
+                        e_c = (e_c - e_c.mean()) / (e_c.std() + 1e-8)
+                        zc_new = target_ac * za + math.sqrt(max(1 - target_ac**2, 1e-6)) * e_c
+                        zc_new = (zc_new - zc_new.mean()) / (zc_new.std() + 1e-8)
+
+                        # 重建B：A直接效应 + C间接效应，确保两个都显著
+                        cp_use = float(np.sign(cprime_val)) * max(abs(cprime_val), 0.18)
+                        b_use = float(np.sign(b_val)) * max(abs(b_val), 0.25)
+                        e_b = rng_fix.standard_normal(N)
+                        e_b = (e_b - e_b.mean()) / (e_b.std() + 1e-8)
+                        var_used = cp_use**2 + b_use**2 + 2*cp_use*b_use*target_ac
+                        var_used = max(0.0, min(var_used, 0.92))
+                        zb_new = cp_use * za + b_use * zc_new + math.sqrt(1 - var_used) * e_b
+                        zb_new = (zb_new - zb_new.mean()) / (zb_new.std() + 1e-8)
+
+                        # 叠回人口学delta到新潜变量（权重0.3，防止膨胀相关）
+                        eff_c = demo_effects.get(C_med, {})
+                        delta_c = (float(eff_c.get("gender", 0) or 0) * gender01
+                                   + float(eff_c.get("grade", 0) or 0) * grade_num
+                                   + float(eff_c.get("origin", 0) or 0) * origin01
+                                   + float(eff_c.get("cadre", 0) or 0) * cadre01
+                                   + float(eff_c.get("only", 0) or 0) * only01)
+                        eff_b = demo_effects.get(B_med, {})
+                        delta_b = (float(eff_b.get("gender", 0) or 0) * gender01
+                                   + float(eff_b.get("grade", 0) or 0) * grade_num
+                                   + float(eff_b.get("origin", 0) or 0) * origin01
+                                   + float(eff_b.get("cadre", 0) or 0) * cadre01
+                                   + float(eff_b.get("only", 0) or 0) * only01)
+
+                        Z[C_med] = pd.Series(zc_new + delta_c * 0.3, index=Z.index)
+                        Z[B_med] = pd.Series(zb_new + delta_b * 0.3, index=Z.index)
                 # 5) 输出 DataFrame
                 out = pd.DataFrame({"ID": np.arange(1, N + 1)})
                 if demo.get("use_Q1", False):

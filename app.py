@@ -254,10 +254,22 @@ with tabs[1]:
         # 更新配置（确保输入的是合法的 JSON 格式）
         try:
             if edited_config_json != config_json:
-                st.session_state.config = json.loads(edited_config_json)
+                st.session_state.config = json.loads(edited_config_json)  # 保存更新的 JSON
                 st.success("配置已更新！")
         except json.JSONDecodeError as e:
             st.error(f"无效的 JSON 格式：{e}")
+
+        # ----------- 应用修改后的配置 ---------------
+        if st.button("应用配置", type="primary"):
+            # 在这里你可以应用 `st.session_state.config` 里的配置
+            cfg = st.session_state.config
+
+            # 应用到后续操作，如维度、反向题设置等
+            # 示例：更新配置中的人口学差异
+            demo_effects = cfg.get("demo_effects", {})
+            if demo_effects:
+                st.write("当前人口学差异设置：")
+                st.write(demo_effects)
 
         # 初始化默认 config
         if not st.session_state.config:

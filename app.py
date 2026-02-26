@@ -1017,7 +1017,8 @@ if isinstance(subdims_all, dict):
             Z[col_name] = Z[big_dim] * 0.8 + np.random.normal(0, 0.2, size=N) 
 
                 # 5) 构造输出数据框
-                out = pd.DataFrame({"ID": np.arange(1, N + 1)})
+                def generate_data():
+    out = pd.DataFrame({"ID": np.arange(1, N + 1)})
 
                 # 人口学变量按启用情况生成列
                 if demo.get("use_Q1", False):

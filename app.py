@@ -1242,8 +1242,7 @@ with tabs[3]:
                             pass
                 else:
                     st.info("未安装 pyreadstat：可以用 CSV + .sps 在 SPSS 中导入，效果相同。")
-                                    else:
-                    st.info("未安装 pyreadstat：可以用 CSV + .sps 在 SPSS 中导入，效果相同。")
+
 
 # ---------- Tab 5 - 可靠性分析 ----------
 with tabs[4]:

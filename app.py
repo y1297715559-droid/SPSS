@@ -183,12 +183,13 @@ def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
     return df_latents
 
 
-def latent_to_items(latent, n_items, mean=3.6, loading=0.8, noise=1.0, seed=42):
+def latent_to_items(latent, n_items, mean=3.5, loading=0.60, noise=1.00, seed=42):
     """
-    简化版题目生成：
-    - 每题载荷 = loading ± 一点随机波动
-    - 误差项的标准差 = noise
-    - 这样 Cronbach α 大致由 loading^2 : noise^2 决定，便于控制在 0.8~0.93
+    目的：让大维度在题目很多（15~40题）时，α 落在 0.80~0.93 的真实区间
+
+    参数建议：
+    - loading 建议在 0.5~0.7 之间（UI 那里可以默认 0.6）
+    - noise   建议在 0.8~1.3 之间（UI 那里可以默认 1.0）
     """
     rng = np.random.default_rng(seed)
     n = len(latent)
@@ -196,22 +197,28 @@ def latent_to_items(latent, n_items, mean=3.6, loading=0.8, noise=1.0, seed=42):
     # 1) 标准化潜变量
     latent_std = (latent - latent.mean()) / (latent.std() + 1e-8)
 
-    # 2) 每题载荷有一点差异（但不离谱）
-    item_loadings = rng.normal(loading, 0.05, n_items)  # 小幅波动
-    item_loadings = np.clip(item_loadings, 0.55, 0.90)
+    # 2) 每个题的载荷有一点差异，但整体不太高
+    base_loading = loading          # 来自界面
+    item_loadings = rng.normal(base_loading, 0.10, n_items)
+    # clip 到 [0.30, 0.75]，避免过高的题间相关
+    item_loadings = np.clip(item_loadings, 0.30, 0.75)
 
-    # 3) 每题难度（截距）稍微有差异
-    item_difficulties = rng.normal(0.0, 0.3, n_items)
+    # 3) 每道题有一个“难度偏移”（让均值不完全一样）
+    item_diffs = rng.normal(0.0, 0.4, n_items)
 
-    # 4) 生成题目分数：X = mean + loading_i * latent_std + difficulty_i + error
-    items = np.zeros((n, n_items))
-    for i in range(n_items):
-        true_score = item_loadings[i] * latent_std + item_difficulties[i]
-        error = rng.normal(0.0, noise, n)  # 噪声大小完全由 noise 控制
+    # 4) 噪声：完全由 noise 控制
+    #    noise 越大，题目间相关越低，α 越低
+    items = np.zeros((n, n_items), dtype=int)
+    for j in range(n_items):
+        true_score = item_loadings[j] * latent_std + item_diffs[j]
+        error = rng.normal(0.0, noise, n)   # 这里是测量误差的主力
+
         continuous = mean + true_score + error
-        items[:, i] = np.clip(np.round(continuous), 1, 5)
 
-    return items.astype(int)
+        # 四舍五入到 1~5
+        items[:, j] = np.clip(np.rint(continuous), 1, 5).astype(int)
+
+    return items
 
 
 def make_spss_syntax_for_csv(csv_filename, df_cols, var_labels, value_labels):
@@ -397,8 +404,8 @@ def generate_data_with_subdims(cfg, qs):
     rev = set(cfg.get("reverse_items", []))
     item_params = cfg.get("item_params", {})
     item_mean = float(item_params.get("mean", 3.6))
-    item_loading = float(item_params.get("loading", 0.85))
-    item_noise = float(item_params.get("noise", 0.45))
+    item_loading = float(item_params.get("loading", 0.60))
+    item_noise = float(item_params.get("noise", 1.00))
 
     # 遍历大维度，生成本维度所有题目
     for d in dim_names:
@@ -750,17 +757,17 @@ with tabs[1]:
                                             float(demo.get("Q5_perc", [38.0, 62.0])[0]), 1.0, key="only_perc")
             with col2:
                 st.metric("非独生子女比例(%)", f"{100.0 - only_perc:.1f}")
-            demo["Q5_perc"] = [only_perc, 100.0 - only_perc]
+        demo["Q5_perc"] = [only_perc, 100.0 - only_perc]
 
         cfg["demo"] = demo
 
         # --- 题目参数设置（改进的默认值） ---
         st.markdown("### 题目参数设置")
-        st.caption("💡 提示：载荷越高、噪声越低，可靠性和相关性越好（想要 α 不要太夸张，就适当把噪声调大一点）")
+        st.caption("💡 提示：载荷越高、噪声越低，可靠性越高；题目多时适当把噪声调大，可以避免 α 过高。")
 
         item_params = cfg.get("item_params", {})
-
         col1, col2, col3 = st.columns(3)
+
         with col1:
             item_params["mean"] = st.number_input(
                 "题目均值",
@@ -768,18 +775,20 @@ with tabs[1]:
                 float(item_params.get("mean", 3.6)),
                 0.1,
             )
+
         with col2:
             item_params["loading"] = st.number_input(
-                "因子载荷",              # 建议 0.75–0.85
-                0.5, 0.95,               # 允许范围
-                float(item_params.get("loading", 0.80)),  # 默认 0.80
+                "因子载荷（建议 0.5~0.7）",
+                0.3, 0.9,
+                float(item_params.get("loading", 0.60)),   # 默认 0.60
                 0.05,
             )
+
         with col3:
             item_params["noise"] = st.number_input(
-                "噪声水平",              # 建议 0.8–1.2
-                0.3, 1.5,                # 允许范围比之前大
-                float(item_params.get("noise", 1.00)),    # 默认 1.00
+                "噪声水平（建议 0.8~1.3）",
+                0.3, 1.5,
+                float(item_params.get("noise", 1.00)),     # 默认 1.00
                 0.05,
             )
 
@@ -787,6 +796,14 @@ with tabs[1]:
 
         rev_txt = st.text_input(
             "反向题题号（逗号分隔）",
+            value=",".join(map(str, cfg.get("reverse_items", []))) if cfg.get("reverse_items") else "",
+            help="例如：8,12,15 表示这些题目在 1~5 上按 1↔5 反向计分。",
+        )
+        cfg["reverse_items"] = [int(x.strip()) for x in rev_txt.split(",") if x.strip().isdigit()]
+
+        if st.button("保存当前配置", type="primary"):
+            st.session_state.config = cfg
+            st.success("配置已保存！")
             value=",".join(map(str, cfg.get("reverse_items", []))) if cfg.get("reverse_items") else "",
             help="例如：8,12,15 表示这些题目在 1~5 上按 1↔5 反向计分。",
         )

@@ -183,7 +183,7 @@ def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
     return df_latents
 
 
-def latent_to_items(latent, n_items, mean=3.5, loading=0.88, noise=0.35, seed=42):
+def latent_to_items(latent, n_items, mean=3.5, loading=0.85, noise=0.38, seed=42):
     """改进的题目生成函数，专门优化可靠性"""
     rng = np.random.default_rng(seed)
     n = len(latent)
@@ -191,17 +191,17 @@ def latent_to_items(latent, n_items, mean=3.5, loading=0.88, noise=0.35, seed=42
     # 标准化潜变量
     latent_std = (latent - latent.mean()) / (latent.std() + 1e-8)
     
-    # 关键改进1: 减少题目间的差异，提高一致性
-    item_difficulties = rng.normal(0, 0.15, n_items)  # 从0.3改为0.15
+    # 关键改进1: 适度的题目间差异
+    item_difficulties = rng.normal(0, 0.18, n_items)  # 控制难度差异
     
-    # 关键改进2: 提高因子载荷并减少载荷变异
-    base_loading = max(0.85, loading)
-    item_loadings = rng.normal(base_loading, 0.02, n_items)  # 从0.05改为0.02
-    item_loadings = np.clip(item_loadings, 0.82, 0.95)
+    # 关键改进2: 适度的因子载荷变异
+    base_loading = max(0.80, loading)  # 确保最低0.80
+    item_loadings = rng.normal(base_loading, 0.03, n_items)  # 适度变异
+    item_loadings = np.clip(item_loadings, 0.75, 0.92)  # 控制在0.75-0.92
     
-    # 关键改进3: 添加共同因子以增强题目间相关性
+    # 关键改进3: 适度的共同因子载荷
     common_factor = rng.standard_normal(n)
-    common_loading = 0.15
+    common_loading = 0.12  # 适中的共同因子
     
     # 生成题目分数
     items = np.zeros((n, n_items))
@@ -211,8 +211,8 @@ def latent_to_items(latent, n_items, mean=3.5, loading=0.88, noise=0.35, seed=42
                      common_loading * common_factor + 
                      item_difficulties[i])
         
-        # 关键改进4: 减少测量误差
-        error_var = max(0.05, 1.0 - item_loadings[i] ** 2 - common_loading ** 2)
+        # 关键改进4: 适度的测量误差
+        error_var = max(0.06, 1.0 - item_loadings[i] ** 2 - common_loading ** 2)
         error = rng.normal(0, math.sqrt(error_var * noise * noise), n)
         
         # 连续分数转换为1-5量表
@@ -349,7 +349,7 @@ with tabs[1]:
                     "Q4_perc": [28.0, 72.0],
                     "Q5_perc": [38.0, 62.0],
                 },
-                "item_params": {"mean": 3.5, "loading": 0.88, "noise": 0.35},  # 改进的默认参数
+                "item_params": {"mean": 3.5, "loading": 0.85, "noise": 0.38},  # 改进的默认参数
                 "corr_matrix": None,
                 "mediation": {
                     "A": "A_dim", "C": "A_dim", "B": "A_dim",
@@ -1356,8 +1356,8 @@ with tabs[4]:
             # 快速改进按钮
             st.markdown("### ⚡ 快速改进")
             if st.button("🔧 应用高可靠性参数", use_container_width=True):
-                cfg["item_params"]["loading"] = 0.88
-                cfg["item_params"]["noise"] = 0.35
+                cfg["item_params"]["loading"] = 0.85
+                cfg["item_params"]["noise"] = 0.38
                 cfg["item_params"]["mean"] = 3.5
                 st.session_state.config = cfg
                 st.success("✅ 已应用高可靠性参数，请返回第4页重新生成数据")

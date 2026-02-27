@@ -183,45 +183,48 @@ def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
     return df_latents
 
 
-def latent_to_items(latent, n_items, mean=3.5, loading=0.78, noise=0.5, seed=42):
-    """改进的题目生成函数，专门优化可靠性"""
+def latent_to_items(latent, n_items, mean=3.5, loading=0.72, noise=0.65, seed=42):
+    """改进的题目生成函数，控制可靠性在合理范围"""
     rng = np.random.default_rng(seed)
     n = len(latent)
     
     # 标准化潜变量
     latent_std = (latent - latent.mean()) / (latent.std() + 1e-8)
     
-    # 关键改进1: 增加题目间差异
-    item_difficulties = rng.normal(0, 0.35, n_items)  # 增加难度差异
+    # 大幅增加题目间差异
+    item_difficulties = rng.normal(0, 0.5, n_items)  # 大幅增加难度差异
     
-    # 关键改进2: 增加因子载荷变异
-    base_loading = max(0.70, loading)  # 降低最低载荷
-    item_loadings = rng.normal(base_loading, 0.08, n_items)  # 增加载荷变异
-    item_loadings = np.clip(item_loadings, 0.65, 0.88)  # 扩大载荷范围
+    # 大幅增加因子载荷变异
+    base_loading = max(0.60, loading)  # 进一步降低最低载荷
+    item_loadings = rng.normal(base_loading, 0.12, n_items)  # 大幅增加载荷变异
+    item_loadings = np.clip(item_loadings, 0.55, 0.85)  # 进一步扩大载荷范围
     
-    # 关键改进3: 减少共同因子影响
+    # 几乎取消共同因子
     common_factor = rng.standard_normal(n)
-    common_loading = 0.05  # 大幅减少共同因子
+    common_loading = 0.02  # 几乎没有共同因子
     
     # 生成题目分数
     items = np.zeros((n, n_items))
     for i in range(n_items):
-        # 真分数 = 主因子载荷 * 潜变量 + 共同因子 + 难度参数
+        # 真分数
         true_score = (item_loadings[i] * latent_std + 
                      common_loading * common_factor + 
                      item_difficulties[i])
         
-        # 关键改进4: 增加测量误差
-        error_var = max(0.15, 1.0 - item_loadings[i] ** 2 - common_loading ** 2)  # 增加误差
+        # 大幅增加测量误差
+        error_var = max(0.25, 1.0 - item_loadings[i] ** 2 - common_loading ** 2)
         error = rng.normal(0, math.sqrt(error_var * noise * noise), n)
         
-        # 关键改进5: 添加题目特异性噪声
-        specific_noise = rng.normal(0, 0.3, n)  # 每个题目独特的噪声
+        # 添加更多随机噪声
+        random_noise = rng.normal(0, 0.4, n)  # 增加随机噪声
+        
+        # 添加题目特异性因子
+        item_specific = rng.normal(0, 0.3, n)
         
         # 连续分数转换为1-5量表
-        continuous_score = mean + true_score + error + specific_noise
+        continuous_score = mean + true_score + error + random_noise + item_specific
         
-        # 使用标准的四舍五入转换（不用百分位数）
+        # 使用标准的四舍五入转换
         items[:, i] = np.clip(np.round(continuous_score), 1, 5)
     
     return items.astype(int)
@@ -350,7 +353,7 @@ with tabs[1]:
                     "Q4_perc": [28.0, 72.0],
                     "Q5_perc": [38.0, 62.0],
                 },
-                "item_params": {"mean": 3.5, "loading": 0.78, "noise": 0.5},  # 改进的默认参数
+                "item_params": {"mean": 3.6, "loading": 0.85, "noise": 0.45},  # 改进的默认参数
                 "corr_matrix": None,
                 "mediation": {
                     "A": "A_dim", "C": "A_dim", "B": "A_dim",

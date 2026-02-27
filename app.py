@@ -733,8 +733,12 @@ with tabs[1]:
             st.markdown("**生源地比例（城镇/农村）**")
             col1, col2 = st.columns(2)
             with col1:
-                urban_perc = st.number_input("城镇比例(%)", 0.0, 100.0,
-                                             float(demo.get("Q3_perc", [55.0, 45.0])[0]), 1.0, key="urban_perc")
+                urban_perc = st.number_input(
+                    "城镇比例(%)", 0.0, 100.0,
+                    float(demo.get("Q3_perc", [55.0, 45.0])[0]),
+                    1.0,
+                    key="urban_perc",
+                )
             with col2:
                 st.metric("农村比例(%)", f"{100.0 - urban_perc:.1f}")
             demo["Q3_perc"] = [urban_perc, 100.0 - urban_perc]
@@ -743,8 +747,12 @@ with tabs[1]:
             st.markdown("**班干部比例（是/否）**")
             col1, col2 = st.columns(2)
             with col1:
-                cadre_perc = st.number_input("班干部比例(%)", 0.0, 100.0,
-                                             float(demo.get("Q4_perc", [28.0, 72.0])[0]), 1.0, key="cadre_perc")
+                cadre_perc = st.number_input(
+                    "班干部比例(%)", 0.0, 100.0,
+                    float(demo.get("Q4_perc", [28.0, 72.0])[0]),
+                    1.0,
+                    key="cadre_perc",
+                )
             with col2:
                 st.metric("非班干部比例(%)", f"{100.0 - cadre_perc:.1f}")
             demo["Q4_perc"] = [cadre_perc, 100.0 - cadre_perc]
@@ -753,14 +761,19 @@ with tabs[1]:
             st.markdown("**独生子女比例（独生/非独生）**")
             col1, col2 = st.columns(2)
             with col1:
-                only_perc = st.number_input("独生子女比例(%)", 0.0, 100.0,
-                                            float(demo.get("Q5_perc", [38.0, 62.0])[0]), 1.0, key="only_perc")
+                only_perc = st.number_input(
+                    "独生子女比例(%)", 0.0, 100.0,
+                    float(demo.get("Q5_perc", [38.0, 62.0])[0]),
+                    1.0,
+                    key="only_perc",
+                )
             with col2:
                 st.metric("非独生子女比例(%)", f"{100.0 - only_perc:.1f}")
-        demo["Q5_perc"] = [only_perc, 100.0 - only_perc]
+            # ✅ 注意：这行现在在 if 里面，所以 only_perc 一定存在
+            demo["Q5_perc"] = [only_perc, 100.0 - only_perc]
 
+        # 统一保存 demo 配置
         cfg["demo"] = demo
-
         # --- 题目参数设置（改进的默认值） ---
         st.markdown("### 题目参数设置")
         st.caption("💡 提示：载荷越高、噪声越低，可靠性越高；题目多时适当把噪声调大，可以避免 α 过高。")

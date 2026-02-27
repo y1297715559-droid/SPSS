@@ -789,7 +789,7 @@ with tabs[3]:
                     if qcols:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
-                # 8) 小维度均分（最终修正版：不加demo_delta，保证r精确=0.16）
+                # 8) 小维度均分（Gram-Schmidt正交噪声，VIF≈1，保证全部显著）
                 subdims_all = cfg.get("subdimensions", {})
                 med_cfg = cfg.get("mediation") or {}
                 med_A_name = med_cfg.get("A")
@@ -798,44 +798,52 @@ with tabs[3]:
                 a_val = float(med_cfg.get("a", 0.6)) if med_cfg else 0.0
                 b_val = float(med_cfg.get("b", 0.6)) if med_cfg else 0.0
 
+                def _make_target_unit(arr):
+                    arr = arr.astype(float)
+                    s = arr.std()
+                    if s < 1e-8:
+                        return None
+                    return (arr - arr.mean()) / s
+
                 if isinstance(subdims_all, dict):
                     for big_dim, subdict in subdims_all.items():
                         if not isinstance(subdict, dict):
                             continue
-                        sub_names = list(subdict.keys())
+                        sub_names = [k for k in subdict.keys() if subdict[k]]
                         if not sub_names:
                             continue
 
-                        # 确定目标列（直接用已生成的均分列，不重新标准化合并）
-                        # 确定目标列
-                        target_col = None
-                        t_sign = 1.0
+                        # 确定目标向量
                         target_unit = None
-
                         if big_dim == med_A_name:
-                            # ★ A小维度：合并A_mean和C_mean作为目标，保证两个方向都显著
                             vecs = []
                             if f"{med_A_name}_mean" in out.columns:
-                                am = out[f"{med_A_name}_mean"].to_numpy().astype(float)
-                                vecs.append((am - am.mean()) / (am.std() + 1e-8))
+                                v = _make_target_unit(out[f"{med_A_name}_mean"].to_numpy())
+                                if v is not None:
+                                    vecs.append(v)
                             if med_C_name and f"{med_C_name}_mean" in out.columns:
-                                cm = out[f"{med_C_name}_mean"].to_numpy().astype(float)
-                                vecs.append((cm - cm.mean()) / (cm.std() + 1e-8) * (np.sign(a_val) if a_val != 0 else 1.0))
+                                v = _make_target_unit(out[f"{med_C_name}_mean"].to_numpy())
+                                if v is not None:
+                                    sign = float(np.sign(a_val)) if a_val != 0 else 1.0
+                                    vecs.append(v * sign)
                             if vecs:
                                 combined = sum(vecs) / len(vecs)
-                                combined_std = combined.std()
-                                if combined_std > 1e-8:
-                                    target_unit = (combined - combined.mean()) / combined_std
+                                target_unit = _make_target_unit(combined)
 
                         elif big_dim == med_C_name:
                             if med_B_name and f"{med_B_name}_mean" in out.columns:
-                                bm = out[f"{med_B_name}_mean"].to_numpy().astype(float)
-                                target_unit = (bm - bm.mean()) / (bm.std() + 1e-8)
-                                t_sign = float(np.sign(b_val)) if b_val != 0 else 1.0
+                                v = _make_target_unit(out[f"{med_B_name}_mean"].to_numpy())
+                                if v is not None:
+                                    sign = float(np.sign(b_val)) if b_val != 0 else 1.0
+                                    target_unit = v * sign
+
+                        # Gram-Schmidt正交基（噪声互相正交且与target正交）
+                        r_desired = 0.25
+                        basis = []
+                        if target_unit is not None:
+                            basis = [target_unit]
 
                         for si, sub_name in enumerate(sub_names):
-                            if not subdict[sub_name]:
-                                continue
                             qcols = [f"Q{qid}" for qid in subdict[sub_name]
                                      if f"Q{qid}" in out.columns]
                             if not qcols:
@@ -843,25 +851,22 @@ with tabs[3]:
                             safe_sub = re.sub(r"\W+", "", sub_name)
                             col_name = f"{big_dim}_{safe_sub}_mean"
                             raw_mean = out[qcols].mean(axis=1).to_numpy().astype(float)
-                            raw_mu = raw_mean.mean()
-                            raw_std = raw_mean.std()
+                            raw_mu, raw_std = raw_mean.mean(), raw_mean.std()
 
-                            if target_col is not None:
-                                # ★ 直接以目标列标准化向量构建相关
-                                target_arr = out[target_col].to_numpy().astype(float)
-                                target_z = (target_arr - target_arr.mean()) / (target_arr.std() + 1e-8)
-
-                                # 生成正交噪声
+                            if target_unit is not None:
+                                # 生成与所有已有基正交的噪声
                                 rng_sub = np.random.default_rng(seed + si + abs(hash(sub_name)) % 99999)
                                 noise = rng_sub.standard_normal(N)
-                                noise = noise - np.dot(noise, target_z) / (np.dot(target_z, target_z) + 1e-8) * target_z
-                                noise = (noise - noise.mean()) / (noise.std() + 1e-8)
+                                for b in basis:
+                                    noise = noise - np.dot(noise, b) / (np.dot(b, b) + 1e-8) * b
+                                noise_std = noise.std()
+                                if noise_std < 1e-8:
+                                    noise = rng_sub.standard_normal(N)
+                                    noise_std = noise.std()
+                                noise = (noise - noise.mean()) / noise_std
+                                basis.append(noise)  # 加入正交基
 
-                                # r=0.16 → t=4.0(N=630) p<0.001，严格保证显著
-                                r = t_sign * 0.28
-                                sub_z = r * target_z + math.sqrt(max(1 - r**2, 1e-8)) * noise
-
-                                # 还原量纲，不加任何额外项
+                                sub_z = r_desired * target_unit + math.sqrt(max(1 - r_desired**2, 1e-8)) * noise
                                 if raw_std > 1e-8:
                                     sub_final = sub_z * raw_std + raw_mu
                                 else:

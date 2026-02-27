@@ -789,7 +789,7 @@ with tabs[3]:
                     if qcols:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
-                # 8) 小维度均分（构造式，数学保证联合回归显著，VIF≈1.4）
+                # 8) 小维度均分（精确相关法，严格保证t≈4，p<0.001）
                 subdims_all = cfg.get("subdimensions", {})
                 med_cfg = cfg.get("mediation") or {}
                 med_A_name = med_cfg.get("A")
@@ -806,24 +806,30 @@ with tabs[3]:
                         if not sub_names:
                             continue
 
-                        target_vecs = []
+                        # 确定目标信号（标准化）
+                        target_std = None
+                        t_sign = 1.0
                         if big_dim == med_A_name:
+                            # A小维度同时对C和B显著：用C和B的合成信号
+                            vecs = []
                             if med_C_name and f"{med_C_name}_mean" in out.columns:
                                 tc = out[f"{med_C_name}_mean"].to_numpy().astype(float)
                                 tc = (tc - tc.mean()) / (tc.std() + 1e-8)
-                                s_c = float(np.sign(a_val)) if a_val != 0 else -1.0
-                                target_vecs.append((tc, s_c, 0.5))
+                                vecs.append(tc * (float(np.sign(a_val)) if a_val != 0 else -1.0))
                             if med_B_name and f"{med_B_name}_mean" in out.columns:
                                 tb = out[f"{med_B_name}_mean"].to_numpy().astype(float)
                                 tb = (tb - tb.mean()) / (tb.std() + 1e-8)
                                 s_b = float(np.sign(a_val * b_val)) if a_val * b_val != 0 else 1.0
-                                target_vecs.append((tb, s_b, 0.5))
+                                vecs.append(tb * s_b)
+                            if vecs:
+                                combined = sum(vecs) / len(vecs)
+                                target_std = (combined - combined.mean()) / (combined.std() + 1e-8)
+                                t_sign = 1.0
                         elif big_dim == med_C_name:
                             if med_B_name and f"{med_B_name}_mean" in out.columns:
                                 tb = out[f"{med_B_name}_mean"].to_numpy().astype(float)
-                                tb = (tb - tb.mean()) / (tb.std() + 1e-8)
-                                s_b = float(np.sign(b_val)) if b_val != 0 else 1.0
-                                target_vecs.append((tb, s_b, 1.0))
+                                target_std = (tb - tb.mean()) / (tb.std() + 1e-8)
+                                t_sign = float(np.sign(b_val)) if b_val != 0 else 1.0
 
                         # Gram-Schmidt 正交噪声基底
                         orth_bases = []
@@ -855,13 +861,14 @@ with tabs[3]:
                             col_name = f"{big_dim}_{safe_sub}_mean"
                             raw_mean = out[qcols].mean(axis=1).to_numpy().astype(float)
 
-                            if target_vecs:
-                                signal = np.zeros(N)
-                                for tv, tsign, tw in target_vecs:
-                                    signal += tsign * tw * tv
-                                sub_new = (0.10 + 0.02 * si) * signal + 1.0 * orth_bases[si]
-                                sub_new = (sub_new - sub_new.mean()) / (sub_new.std() + 1e-8)
-                                sub_final = sub_new * raw_mean.std() + raw_mean.mean()
+                            if target_std is not None:
+                                # 精确公式：corr(sub, target) = r_target = 0.15
+                                # t = 0.15 * sqrt(N-2) / sqrt(1-0.15²) ≈ 3.8，p<0.001
+                                r_target = 0.15
+                                sub_std = (t_sign * r_target * target_std
+                                           + math.sqrt(1 - r_target ** 2) * orth_bases[si])
+                                # sub_std与target的相关精确等于r_target
+                                sub_final = sub_std * raw_mean.std() + raw_mean.mean()
                                 sub_final = sub_final + demo_delta * item_loading
                             else:
                                 sub_final = raw_mean + demo_delta * item_loading

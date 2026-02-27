@@ -973,19 +973,15 @@ with tabs[3]:
         if not dim_names:
             st.warning("还没有设置任何维度，请先到第 2 页配置。")
         else:
-            # 🚫 这里不用再算 N / seed / R，也不用再写生成逻辑了
-            # N = int(cfg.get("N", 630))
-            # seed = int(cfg.get("seed", 42))
-            # ... 这一堆原来的人口学 / Z / 小维度构造全删掉 ...
-
-            # ✅ 只保留下面这一段：
+            # 这里只负责调用统一生成函数
             if st.button("生成数据", type="primary"):
-                # 调用你在前面定义好的统一生成函数
                 out = generate_data_with_subdims(cfg, qs)
-
                 st.session_state.generated = out
-                st.success(f"✅ 已生成 {out.shape[0]} 行 × {out.shape[1]} 列数据（小维度 = 题目真·算术平均值）")(f"✅ 已生成 {N} 行 × {out.shape[1]} 列数据，采用改进算法提升统计特性。")
-                                # 实时可靠性检查
+                st.success(
+                    f"✅ 已生成 {out.shape[0]} 行 × {out.shape[1]} 列数据（小维度 = 题目真·算术平均值）"
+                )
+                # 如果你后面想在这里继续做“实时可靠性检查”，
+                # 也可以接着用 out 这个变量来算；注意不要再用 N 这个名字。
                 st.markdown("### 📊 实时可靠性检查")
                 reliability_results = {}
                 all_qualified = True

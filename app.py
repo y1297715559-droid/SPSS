@@ -271,7 +271,204 @@ EXECUTE.
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
+def generate_data_with_subdims(cfg, qs):
+    """
+    统一的数据生成函数：
+    - 每一道题 Qk 都是 1–5 的整数
+    - 大维度均值 = 这些题目的真·算术平均值（和EXCEL AVERAGE完全一样）
+    - 小维度均值 = 小维度题目的真·算术平均值（同样是EXCEL AVERAGE）
+    - 人口学效应 / 中介 / 维度相关都只在潜变量 Z 上控制，不再对大/小维度均值做“二次加工”
+    """
+    dims_map = cfg.get("dimensions", {})
+    dim_names = list(dims_map.keys())
+    if not dim_names:
+        raise ValueError("dimensions 为空，先在第2页配置大维度。")
 
+    # ---------- 基本参数 ----------
+    N = int(cfg.get("N", 630))
+    seed = int(cfg.get("seed", 42))
+    rng = np.random.default_rng(seed)
+
+    all_qids = sorted([q["qid"] for q in qs])
+    min_qid = min(all_qids)
+    max_qid = max(all_qids)
+    scale_start_qid = int(cfg.get("scale_start_qid", 6))
+    scale_start_qid = max(min_qid, min(max_qid, scale_start_qid))
+
+    # ---------- 1) 人口学变量 ----------
+    demo = cfg.get("demo", {})
+
+    # 性别
+    q1_perc = demo.get("Q1_perc", [50.0, 50.0])
+    probs_gender = np.array(q1_perc[:2], dtype=float)
+    probs_gender /= probs_gender.sum()
+    gender_cat = rng.choice([1, 2], size=N, p=probs_gender)
+    gender01 = (gender_cat == 2).astype(float)  # 女=1, 男=0
+
+    # 年级
+    grade_levels = int(demo.get("grade_levels", 3))
+    if grade_levels not in (3, 4):
+        grade_levels = 3
+    q2_perc = demo.get("Q2_perc", [35.0, 40.0, 25.0, 0.0])
+    probs_q2 = np.array(q2_perc[:grade_levels], dtype=float)
+    probs_q2 /= probs_q2.sum()
+    grade_cat = rng.choice(list(range(1, grade_levels + 1)), size=N, p=probs_q2)
+    # 用 0~1 的连续变量表示年级高低
+    grade_num = (grade_cat - 1).astype(float) / (grade_levels - 1)
+
+    # 生源地
+    q3p = demo.get("Q3_perc", [55.0, 45.0])
+    probs_q3 = np.array(q3p[:2], dtype=float)
+    probs_q3 /= probs_q3.sum()
+    origin_cat = rng.choice([1, 2], size=N, p=probs_q3)
+    origin01 = (origin_cat == 2).astype(float)  # 农村=1, 城镇=0
+
+    # 班干部
+    q4p = demo.get("Q4_perc", [28.0, 72.0])
+    probs_q4 = np.array(q4p[:2], dtype=float)
+    probs_q4 /= probs_q4.sum()
+    cadre_cat = rng.choice([1, 2], size=N, p=probs_q4)
+    cadre01 = (cadre_cat == 1).astype(float)  # 班干部=1
+
+    # 独生子女
+    q5p = demo.get("Q5_perc", [38.0, 62.0])
+    probs_q5 = np.array(q5p[:2], dtype=float)
+    probs_q5 /= probs_q5.sum()
+    only_cat = rng.choice([1, 2], size=N, p=probs_q5)
+    only01 = (only_cat == 1).astype(float)  # 独生=1
+
+    # ---------- 2) 潜变量 Z（含相关矩阵） ----------
+    k = len(dim_names)
+    R = np.eye(k)
+    cm = cfg.get("corr_matrix")
+    if (isinstance(cm, list) and len(cm) == k
+            and all(isinstance(r, list) and len(r) == k for r in cm)):
+        try:
+            R = np.array(cm, dtype=float)
+        except Exception:
+            R = np.eye(k)
+
+    # 利用你已有的 generate_latents
+    Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
+
+    # ---------- 3) 应用中介结构（可选） ----------
+    med = cfg.get("mediation")
+    if med:
+        A_med = med.get("A")
+        C_med = med.get("C")
+        B_med = med.get("B")
+        if (A_med in Z.columns and C_med in Z.columns and B_med in Z.columns):
+            Z = apply_mediation(
+                Z, A_med, C_med, B_med,
+                a=float(med.get("a", 0.6)),
+                b=float(med.get("b", 0.6)),
+                cprime=float(med.get("cprime", 0.1)),
+                seed=seed + 7,
+            )
+
+    # ---------- 4) 人口学差异 β 叠加在 Z 上 ----------
+    demo_effects = cfg.get("demo_effects", {})
+    for d in dim_names:
+        eff = demo_effects.get(d, {})
+        if not isinstance(eff, dict):
+            eff = {}
+        b_gender = float(eff.get("gender", 0.0) or 0.0)
+        b_grade = float(eff.get("grade", 0.0) or 0.0)
+        b_origin = float(eff.get("origin", 0.0) or 0.0)
+        b_cadre = float(eff.get("cadre", 0.0) or 0.0)
+        b_only = float(eff.get("only", 0.0) or 0.0)
+
+        if any(abs(x) > 0 for x in [b_gender, b_grade, b_origin, b_cadre, b_only]):
+            # 把人口学变量映射到 [-1, 1] 区间再乘系数
+            delta = (
+                b_gender * (gender01 - 0.5) * 2
+                + b_grade * (grade_num - 0.5) * 2
+                + b_origin * (origin01 - 0.5) * 2
+                + b_cadre * (cadre01 - 0.5) * 2
+                + b_only * (only01 - 0.5) * 2
+            )
+            Z[d] = Z[d] + delta
+
+    # ---------- 5) 生成题目数据 Qk（1–5分） ----------
+    out = pd.DataFrame({"ID": np.arange(1, N + 1)})
+
+    # 人口学变量写入
+    if demo.get("use_Q1", False):
+        out["Q1"] = gender_cat
+    if demo.get("use_Q2", False):
+        out["Q2"] = grade_cat
+    if demo.get("use_Q3", False):
+        out["Q3"] = origin_cat
+    if demo.get("use_Q4", False):
+        out["Q4"] = cadre_cat
+    if demo.get("use_Q5", False):
+        out["Q5"] = only_cat
+
+    # 题目归属映射
+    qid_to_dim = {}
+    for d in dim_names:
+        for qid in dims_map[d]:
+            qid_to_dim[qid] = d
+
+    rev = set(cfg.get("reverse_items", []))
+    item_params = cfg.get("item_params", {})
+    item_mean = float(item_params.get("mean", 3.6))
+    item_loading = float(item_params.get("loading", 0.85))
+    item_noise = float(item_params.get("noise", 0.45))
+
+    # 遍历大维度，生成本维度所有题目
+    for d in dim_names:
+        qids = sorted([qid for qid, dd in qid_to_dim.items()
+                       if dd == d and qid >= scale_start_qid])
+        if not qids:
+            continue
+
+        disc = latent_to_items(
+            Z[d].to_numpy(), len(qids),
+            mean=item_mean, loading=item_loading, noise=item_noise,
+            seed=seed + 13 + (hash(d) % 1000),
+        )
+        for idx, qid in enumerate(qids):
+            x = disc[:, idx]
+            if qid in rev:
+                x = 6 - x  # 反向计分
+            out[f"Q{qid}"] = x
+
+    # ---------- 6) 大维度均值（真·算术平均） ----------
+    cols = ["ID"]
+    for qid in all_qids:
+        col = f"Q{qid}"
+        if col in out.columns:
+            cols.append(col)
+
+    for d in dim_names:
+        qcols = [f"Q{qid}" for qid in dims_map[d]
+                 if f"Q{qid}" in out.columns and qid >= scale_start_qid]
+        if qcols:
+            out[f"{d}_mean"] = out[qcols].mean(axis=1)
+            cols.append(f"{d}_mean")
+
+    # ---------- 7) 小维度均值（真·算术平均，不再做二次设计） ----------
+    subdims_all = cfg.get("subdimensions", {})
+    if isinstance(subdims_all, dict):
+        for big_dim, subdict in subdims_all.items():
+            if not isinstance(subdict, dict):
+                continue
+            for sub_name, sub_qids in subdict.items():
+                if not sub_qids:
+                    continue
+                qcols = [f"Q{qid}" for qid in sub_qids
+                         if f"Q{qid}" in out.columns and qid >= scale_start_qid]
+                if not qcols:
+                    continue
+                safe_sub = re.sub(r"\W+", "", sub_name)
+                col_name = f"{big_dim}_{safe_sub}_mean"
+                out[col_name] = out[qcols].mean(axis=1)
+                cols.append(col_name)
+
+    # 最终列顺序
+    out = out[cols]
+    return out
 # ---------- session_state 初始化 ----------
 if "questions" not in st.session_state:
     st.session_state.questions = []
@@ -776,242 +973,18 @@ with tabs[3]:
         if not dim_names:
             st.warning("还没有设置任何维度，请先到第 2 页配置。")
         else:
-            N = int(cfg.get("N", 630))
-            seed = int(cfg.get("seed", 42))
+            # 🚫 这里不用再算 N / seed / R，也不用再写生成逻辑了
+            # N = int(cfg.get("N", 630))
+            # seed = int(cfg.get("seed", 42))
+            # ... 这一堆原来的人口学 / Z / 小维度构造全删掉 ...
 
-            all_qids = sorted([q["qid"] for q in qs])
-            min_qid = min(all_qids)
-            max_qid = max(all_qids)
-            scale_start_qid = int(cfg.get("scale_start_qid", 6))
-            scale_start_qid = max(min_qid, min(max_qid, scale_start_qid))
-
-            k = len(dim_names)
-            R = np.eye(k)
-            cm = cfg.get("corr_matrix")
-            if (isinstance(cm, list) and len(cm) == k
-                    and all(isinstance(r, list) and len(r) == k for r in cm)):
-                try:
-                    R = np.array(cm, dtype=float)
-                except Exception:
-                    R = np.eye(k)
-
+            # ✅ 只保留下面这一段：
             if st.button("生成数据", type="primary"):
-                rng = np.random.default_rng(seed)
-                demo = cfg.get("demo", {})
+                # 调用你在前面定义好的统一生成函数
+                out = generate_data_with_subdims(cfg, qs)
 
-                # 1) 人口学变量
-                q1_perc = demo.get("Q1_perc", [50.0, 50.0])
-                probs_gender = np.array(q1_perc[:2], dtype=float)
-                probs_gender /= probs_gender.sum()
-                gender_cat = rng.choice([1, 2], size=N, p=probs_gender)
-                gender01 = (gender_cat == 2).astype(float)
-
-                grade_levels = int(demo.get("grade_levels", 3))
-                if grade_levels not in (3, 4):
-                    grade_levels = 3
-                q2_perc = demo.get("Q2_perc", [35.0, 40.0, 25.0, 0.0])
-                probs_q2 = np.array(q2_perc[:grade_levels], dtype=float)
-                probs_q2 /= probs_q2.sum()
-                grade_cat = rng.choice(list(range(1, grade_levels + 1)), size=N, p=probs_q2)
-                grade_num = (grade_cat - 1).astype(float) / (grade_levels - 1)  # 标准化到[0,1]
-
-                q3p = demo.get("Q3_perc", [55.0, 45.0])
-                probs_q3 = np.array(q3p[:2], dtype=float)
-                probs_q3 /= probs_q3.sum()
-                origin_cat = rng.choice([1, 2], size=N, p=probs_q3)
-                origin01 = (origin_cat == 2).astype(float)
-
-                q4p = demo.get("Q4_perc", [28.0, 72.0])
-                probs_q4 = np.array(q4p[:2], dtype=float)
-                probs_q4 /= probs_q4.sum()
-                cadre_cat = rng.choice([1, 2], size=N, p=probs_q4)
-                cadre01 = (cadre_cat == 1).astype(float)
-
-                q5p = demo.get("Q5_perc", [38.0, 62.0])
-                probs_q5 = np.array(q5p[:2], dtype=float)
-                probs_q5 /= probs_q5.sum()
-                only_cat = rng.choice([1, 2], size=N, p=probs_q5)
-                only01 = (only_cat == 1).astype(float)
-
-                # 2) 潜变量（改进的生成）
-                Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
-
-                # 3) 中介结构（改进的应用）
-                med = cfg.get("mediation")
-                if med:
-                    A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
-                    if (A_med in Z.columns and C_med in Z.columns and B_med in Z.columns):
-                        Z = apply_mediation(
-                            Z, A_med, C_med, B_med,
-                            a=float(med.get("a", 0.6)),
-                            b=float(med.get("b", 0.6)),
-                            cprime=float(med.get("cprime", 0.1)),
-                            seed=seed + 7,
-                        )
-
-                # 4) 人口学差异 β（改进的应用方式）
-                demo_effects = cfg.get("demo_effects", {})
-                for d in dim_names:
-                    eff = demo_effects.get(d, {})
-                    if not isinstance(eff, dict):
-                        eff = {}
-                    b_gender = float(eff.get("gender", 0.0) or 0.0)
-                    b_grade = float(eff.get("grade", 0.0) or 0.0)
-                    b_origin = float(eff.get("origin", 0.0) or 0.0)
-                    b_cadre = float(eff.get("cadre", 0.0) or 0.0)
-                    b_only = float(eff.get("only", 0.0) or 0.0)
-                    
-                    if any(abs(x) > 0 for x in [b_gender, b_grade, b_origin, b_cadre, b_only]):
-                        # 标准化人口学变量的影响
-                        delta = (b_gender * (gender01 - 0.5) * 2 +  # 转换为[-1,1]
-                                b_grade * (grade_num - 0.5) * 2 +
-                                b_origin * (origin01 - 0.5) * 2 +
-                                b_cadre * (cadre01 - 0.5) * 2 +
-                                b_only * (only01 - 0.5) * 2)
-                        Z[d] = Z[d] + delta
-
-                # 5) 输出 DataFrame
-                out = pd.DataFrame({"ID": np.arange(1, N + 1)})
-                if demo.get("use_Q1", False):
-                    out["Q1"] = gender_cat
-                if demo.get("use_Q2", False):
-                    out["Q2"] = grade_cat
-                if demo.get("use_Q3", False):
-                    out["Q3"] = origin_cat
-                if demo.get("use_Q4", False):
-                    out["Q4"] = cadre_cat
-                if demo.get("use_Q5", False):
-                    out["Q5"] = only_cat
-
-                # 6) 潜变量 → 题目分数（改进的生成）
-                qid_to_dim = {}
-                for d in dim_names:
-                    for qid in dims_map[d]:
-                        qid_to_dim[qid] = d
-                rev = set(cfg.get("reverse_items", []))
-                item_params = cfg.get("item_params", {})
-                item_mean = float(item_params.get("mean", 3.6))
-                item_loading = float(item_params.get("loading", 0.85))
-                item_noise = float(item_params.get("noise", 0.45))
-
-                for d in dim_names:
-                    qids = sorted([qid for qid, dd in qid_to_dim.items()
-                                   if dd == d and qid >= scale_start_qid])
-                    if not qids:
-                        continue
-                    disc = latent_to_items(
-                        Z[d].to_numpy(), len(qids),
-                        mean=item_mean, loading=item_loading, noise=item_noise,
-                        seed=seed + 13 + (hash(d) % 1000),
-                    )
-                    for idx, qid in enumerate(qids):
-                        x = disc[:, idx]
-                        if qid in rev:
-                            x = 6 - x
-                        out[f"Q{qid}"] = x
-
-                # 7) 大维度均分
-                cols = ["ID"]
-                for qid in all_qids:
-                    if f"Q{qid}" in out.columns:
-                        cols.append(f"Q{qid}")
-                for d in dim_names:
-                    qcols = [f"Q{qid}" for qid in dims_map[d] if f"Q{qid}" in out.columns]
-                    if qcols:
-                        out[f"{d}_mean"] = out[qcols].mean(axis=1)
-                        cols.append(f"{d}_mean")
-
-                # 8) 小维度均分（改进的Gram-Schmidt正交噪声）
-                subdims_all = cfg.get("subdimensions", {})
-                med_cfg = cfg.get("mediation") or {}
-                med_A_name = med_cfg.get("A")
-                med_C_name = med_cfg.get("C")
-                med_B_name = med_cfg.get("B")
-                a_val = float(med_cfg.get("a", 0.6)) if med_cfg else 0.0
-                b_val = float(med_cfg.get("b", 0.6)) if med_cfg else 0.0
-
-                def _make_target_unit(arr):
-                    arr = arr.astype(float)
-                    s = arr.std()
-                    if s < 1e-8:
-                        return None
-                    return (arr - arr.mean()) / s
-
-                if isinstance(subdims_all, dict):
-                    for big_dim, subdict in subdims_all.items():
-                        if not isinstance(subdict, dict):
-                            continue
-                        sub_names = [k for k in subdict.keys() if subdict[k]]
-                        if not sub_names:
-                            continue
-
-                        # 确定目标向量
-                        target_unit = None
-                        if big_dim == med_A_name:
-                            vecs = []
-                            if f"{med_A_name}_mean" in out.columns:
-                                v = _make_target_unit(out[f"{med_A_name}_mean"].to_numpy())
-                                if v is not None:
-                                    vecs.append(v)
-                            if med_C_name and f"{med_C_name}_mean" in out.columns:
-                                v = _make_target_unit(out[f"{med_C_name}_mean"].to_numpy())
-                                if v is not None:
-                                    sign = float(np.sign(a_val)) if a_val != 0 else 1.0
-                                    vecs.append(v * sign)
-                            if vecs:
-                                combined = sum(vecs) / len(vecs)
-                                target_unit = _make_target_unit(combined)
-
-                        elif big_dim == med_C_name:
-                            if med_B_name and f"{med_B_name}_mean" in out.columns:
-                                v = _make_target_unit(out[f"{med_B_name}_mean"].to_numpy())
-                                if v is not None:
-                                    sign = float(np.sign(b_val)) if b_val != 0 else 1.0
-                                    target_unit = v * sign
-
-                        # Gram-Schmidt正交基（改进的相关性控制）
-                        r_desired = 0.35  # 稍微提高目标相关性
-                        basis = []
-                        if target_unit is not None:
-                            basis = [target_unit]
-
-                        for si, sub_name in enumerate(sub_names):
-                            qcols = [f"Q{qid}" for qid in subdict[sub_name]
-                                     if f"Q{qid}" in out.columns]
-                            if not qcols:
-                                continue
-                            safe_sub = re.sub(r"\W+", "", sub_name)
-                            col_name = f"{big_dim}_{safe_sub}_mean"
-                            raw_mean = out[qcols].mean(axis=1).to_numpy().astype(float)
-                            raw_mu, raw_std = raw_mean.mean(), raw_mean.std()
-
-                            if target_unit is not None:
-                                # 生成与所有已有基正交的噪声
-                                rng_sub = np.random.default_rng(seed + si + abs(hash(sub_name)) % 99999)
-                                noise = rng_sub.standard_normal(N)
-                                for b in basis:
-                                    noise = noise - np.dot(noise, b) / (np.dot(b, b) + 1e-8) * b
-                                noise_std = noise.std()
-                                if noise_std < 1e-8:
-                                    noise = rng_sub.standard_normal(N)
-                                    noise_std = noise.std()
-                                noise = (noise - noise.mean()) / noise_std
-                                basis.append(noise)  # 加入正交基
-
-                                sub_z = r_desired * target_unit + math.sqrt(max(1 - r_desired**2, 1e-8)) * noise
-                                if raw_std > 1e-8:
-                                    sub_final = sub_z * raw_std + raw_mu
-                                else:
-                                    sub_final = sub_z + raw_mu
-                            else:
-                                sub_final = raw_mean.copy()
-
-                            out[col_name] = sub_final
-                            cols.append(col_name)
-
-                out = out[cols]
                 st.session_state.generated = out
-                st.success(f"✅ 已生成 {N} 行 × {out.shape[1]} 列数据，采用改进算法提升统计特性。")
+                st.success(f"✅ 已生成 {out.shape[0]} 行 × {out.shape[1]} 列数据（小维度 = 题目真·算术平均值）")(f"✅ 已生成 {N} 行 × {out.shape[1]} 列数据，采用改进算法提升统计特性。")
                                 # 实时可靠性检查
                 st.markdown("### 📊 实时可靠性检查")
                 reliability_results = {}

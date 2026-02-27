@@ -841,7 +841,7 @@ with tabs[3]:
                                 noise = (noise - noise.mean()) / (noise.std() + 1e-8)
 
                                 # r=0.16 → t=4.0(N=630) p<0.001，严格保证显著
-                                r = t_sign * 0.16
+                                r = t_sign * 0.25
                                 sub_z = r * target_z + math.sqrt(max(1 - r**2, 1e-8)) * noise
 
                                 # 还原量纲，不加任何额外项

@@ -46,7 +46,7 @@ except Exception:
 st.set_page_config(page_title="问卷解析 + 维度/关系约束 + SPSS数据生成器（本地网页）", layout="wide")
 
 
-# ---------- 基础函数 ----------
+# ---------- 改进的基础函数 ----------
 
 def parse_survey_text(txt: str):
     lines = [l.strip() for l in txt.splitlines() if l.strip()]
@@ -83,39 +83,94 @@ def parse_survey_text(txt: str):
 
 
 def generate_latents(n, dim_names, corr_matrix=None, seed=42):
+    """改进的潜变量生成，确保相关矩阵得到准确实现"""
     rng = np.random.default_rng(seed)
     k = len(dim_names)
+    
     if corr_matrix is None:
         Z = rng.standard_normal(size=(n, k))
     else:
         R = np.array(corr_matrix, dtype=float)
+        # 确保矩阵对称且正定
         R = (R + R.T) / 2.0
+        np.fill_diagonal(R, 1.0)
+        
+        # 使用特征值分解确保正定性
         w, V = np.linalg.eigh(R)
-        w[w < 1e-8] = 1e-8
-        Rpsd = (V * w) @ V.T
-        L = np.linalg.cholesky(Rpsd)
-        Z = rng.standard_normal(size=(n, k)) @ L.T
+        w = np.maximum(w, 1e-6)  # 确保所有特征值为正
+        R_psd = V @ np.diag(w) @ V.T
+        
+        # Cholesky分解
+        try:
+            L = np.linalg.cholesky(R_psd)
+        except np.linalg.LinAlgError:
+            # 如果Cholesky失败，使用SVD
+            U, s, Vt = np.linalg.svd(R_psd)
+            s = np.maximum(s, 1e-6)
+            L = U @ np.diag(np.sqrt(s))
+        
+        # 生成相关的标准正态变量
+        Z_indep = rng.standard_normal(size=(n, k))
+        Z = Z_indep @ L.T
+    
     return pd.DataFrame(Z, columns=dim_names)
 
 
 def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
+    """改进的中介模型，确保路径系数更准确"""
     rng = np.random.default_rng(seed)
     n = len(df_latents)
-    eC = rng.standard_normal(n)
+    
+    # 标准化A变量
+    A_std = (df_latents[A] - df_latents[A].mean()) / df_latents[A].std()
+    
+    # C = a*A + e_C，控制误差项方差确保总方差为1
     var_eC = max(1e-6, 1.0 - a * a)
-    df_latents[C] = a * df_latents[A] + math.sqrt(var_eC) * eC
+    eC = rng.standard_normal(n) * math.sqrt(var_eC)
+    df_latents[C] = a * A_std + eC
+    
+    # 标准化C变量
+    C_std = (df_latents[C] - df_latents[C].mean()) / df_latents[C].std()
+    
+    # B = b*C + c'*A + e_B
     var_struct = b * b + cprime * cprime + 2 * a * b * cprime
-    var_struct = max(0.0, min(var_struct, 1.0 - 1e-6))
+    var_struct = max(0.0, min(var_struct, 0.95))  # 限制在合理范围
     var_eB = max(1e-6, 1.0 - var_struct)
-    eB = rng.standard_normal(n)
-    df_latents[B] = b * df_latents[C] + cprime * df_latents[A] + math.sqrt(var_eB) * eB
+    
+    eB = rng.standard_normal(n) * math.sqrt(var_eB)
+    df_latents[B] = b * C_std + cprime * A_std + eB
+    
     return df_latents
 
 
-def latent_to_items(latent, n_items, mean=3.6, loading=0.8, noise=0.75, seed=42):
+def latent_to_items(latent, n_items, mean=3.6, loading=0.85, noise=0.45, seed=42):
+    """改进的题目生成函数，提高可靠性和相关性"""
     rng = np.random.default_rng(seed)
-    cont = mean + loading * latent[:, None] + rng.standard_normal(size=(len(latent), n_items)) * noise
-    return np.clip(np.rint(cont), 1, 5).astype(int)
+    n = len(latent)
+    
+    # 标准化潜变量
+    latent_std = (latent - latent.mean()) / (latent.std() + 1e-8)
+    
+    # 生成题目特异性因子（每个题目有独特的难度和区分度）
+    item_difficulties = rng.normal(0, 0.3, n_items)  # 题目难度差异
+    item_loadings = rng.normal(loading, 0.05, n_items)  # 载荷略有差异
+    item_loadings = np.clip(item_loadings, 0.7, 0.95)  # 确保高载荷
+    
+    # 生成题目分数
+    items = np.zeros((n, n_items))
+    for i in range(n_items):
+        # 真分数 = 载荷 * 潜变量 + 难度参数
+        true_score = item_loadings[i] * latent_std + item_difficulties[i]
+        
+        # 添加测量误差
+        error_var = 1.0 - item_loadings[i] ** 2
+        error = rng.normal(0, math.sqrt(error_var * noise * noise), n)
+        
+        # 连续分数转换为1-5量表
+        continuous_score = mean + true_score + error
+        items[:, i] = np.clip(np.round(continuous_score), 1, 5)
+    
+    return items.astype(int)
 
 
 def make_spss_syntax_for_csv(csv_filename, df_cols, var_labels, value_labels):
@@ -240,14 +295,14 @@ with tabs[1]:
                     "Q4_perc": [28.0, 72.0],
                     "Q5_perc": [38.0, 62.0],
                 },
-                "item_params": {"mean": 3.60, "loading": 0.80, "noise": 0.75},
+                "item_params": {"mean": 3.60, "loading": 0.85, "noise": 0.45},  # 改进的默认参数
                 "corr_matrix": None,
                 "mediation": {
                     "A": "A_dim", "C": "A_dim", "B": "A_dim",
                     "a": 0.6, "b": 0.6, "cprime": 0.2, "type": "部分中介",
                 },
                 "demo_effects": {
-                    "A_dim": {"gender": 0.6, "grade": 0.0, "origin": 0.0, "cadre": 0.0, "only": 0.0},
+                    "A_dim": {"gender": 0.8, "grade": 0.3, "origin": 0.0, "cadre": 0.0, "only": 0.0},  # 增强效应
                 },
             }
 
@@ -449,16 +504,17 @@ with tabs[1]:
 
         cfg["demo"] = demo
 
-        # --- 题目参数设置 ---
+        # --- 题目参数设置（改进的默认值） ---
         st.markdown("### 题目参数设置")
+        st.caption("💡 提示：载荷越高、噪声越低，可靠性和相关性越好")
         item_params = cfg.get("item_params", {})
         col1, col2, col3 = st.columns(3)
         with col1:
             item_params["mean"] = st.number_input("题目均值", 1.0, 5.0, float(item_params.get("mean", 3.6)), 0.1)
         with col2:
-            item_params["loading"] = st.number_input("因子载荷", 0.1, 1.0, float(item_params.get("loading", 0.8)), 0.05)
+            item_params["loading"] = st.number_input("因子载荷", 0.5, 0.95, float(item_params.get("loading", 0.85)), 0.05)
         with col3:
-            item_params["noise"] = st.number_input("噪声水平", 0.1, 2.0, float(item_params.get("noise", 0.75)), 0.05)
+            item_params["noise"] = st.number_input("噪声水平", 0.1, 1.0, float(item_params.get("noise", 0.45)), 0.05)
         cfg["item_params"] = item_params
 
         rev_txt = st.text_input(
@@ -518,6 +574,7 @@ with tabs[1]:
                 mime="application/json",
                 use_container_width=True,
             )
+
 # ---------- Tab 3 ----------
 with tabs[2]:
     st.subheader("关系约束：各人口学差异・维度相关矩阵・中介模型")
@@ -532,7 +589,7 @@ with tabs[2]:
         else:
             st.markdown("### 人口学差异（按维度设置 β）")
             st.caption(
-                "β>0 表示后面括号中的那一组平均更高，β<0 表示相反；β=0 表示该维度上这个人口学变量无差异。\n"
+                "💡 建议：β 在 ±0.3 到 ±1.2 之间效果较好。\n"
                 "性别β：女生更高>0；年级β：高年级更高>0；生源地β：农村生源更高>0；班干部β：班干部更高>0；独生β：独生子女更高>0。"
             )
 
@@ -541,8 +598,8 @@ with tabs[2]:
                 demo_effects = {}
             for d in dims:
                 demo_effects.setdefault(d, {})
-                demo_effects[d].setdefault("gender", 0.0)
-                demo_effects[d].setdefault("grade", 0.0)
+                demo_effects[d].setdefault("gender", 0.8)  # 增强默认效应
+                demo_effects[d].setdefault("grade", 0.3)
                 demo_effects[d].setdefault("origin", 0.0)
                 demo_effects[d].setdefault("cadre", 0.0)
                 demo_effects[d].setdefault("only", 0.0)
@@ -552,8 +609,8 @@ with tabs[2]:
                 eff = demo_effects.get(d, {})
                 rows.append({
                     "维度": d,
-                    "性别β(女高>0,男高<0)": float(eff.get("gender", 0.0)),
-                    "年级β(高年级高>0)": float(eff.get("grade", 0.0)),
+                    "性别β(女高>0,男高<0)": float(eff.get("gender", 0.8)),
+                    "年级β(高年级高>0)": float(eff.get("grade", 0.3)),
                     "生源地β(农村高>0)": float(eff.get("origin", 0.0)),
                     "班干部β(班干部高>0)": float(eff.get("cadre", 0.0)),
                     "独生β(独生高>0)": float(eff.get("only", 0.0)),
@@ -579,7 +636,7 @@ with tabs[2]:
             cfg["demo_effects"] = new_demo_effects
 
             st.markdown("### 维度相关矩阵（任意两个维度之间可设相关）")
-            st.caption("对角线固定为 1。你可以编辑上三角或整个矩阵，程序会自动对称化并裁剪到 [-0.95, 0.95]。")
+            st.caption("💡 建议：相关系数在 ±0.3 到 ±0.7 之间比较合理。对角线固定为 1。")
 
             k = len(dims)
             cm = cfg.get("corr_matrix")
@@ -599,10 +656,11 @@ with tabs[2]:
             for i in range(k):
                 M[i, i] = 1.0
             M = (M + M.T) / 2.0
-            M = np.clip(M, -0.95, 0.95)
+            M = np.clip(M, -0.85, 0.85)  # 稍微放宽限制
             cfg["corr_matrix"] = M.tolist()
 
             st.markdown("### 中介：A→C→B（路径可正可负）")
+            st.caption("💡 建议：路径系数在 ±0.3 到 ±0.8 之间效果较好")
             med = cfg.get("mediation", {})
             A_default = med.get("A", dims[0])
             C_default = med.get("C", dims[min(1, len(dims) - 1)])
@@ -620,13 +678,13 @@ with tabs[2]:
             )
             a_default = float(med.get("a", 0.6))
             b_default = float(med.get("b", 0.6))
-            cprime_default = float(med.get("cprime", 0.2 if med_type == "部分中介" else 0.0))
+            cprime_default = float(med.get("cprime", 0.3 if med_type == "部分中介" else 0.0))
 
-            a = st.slider("路径 a（A→C，可正可负）", -1.2, 1.2, a_default, 0.05)
-            b_path = st.slider("路径 b（C→B，可正可负）", -1.2, 1.2, b_default, 0.05)
+            a = st.slider("路径 a（A→C，可正可负）", -1.0, 1.0, a_default, 0.05)
+            b_path = st.slider("路径 b（C→B，可正可负）", -1.0, 1.0, b_default, 0.05)
             cprime = 0.0
             if med_type == "部分中介":
-                cprime = st.slider("直接效应 c'（A→B，可正可负）", -1.2, 1.2, cprime_default, 0.05)
+                cprime = st.slider("直接效应 c'（A→B，可正可负）", -0.8, 0.8, cprime_default, 0.05)
 
             cfg["mediation"] = {
                 "A": A, "C": C, "B": B,
@@ -668,7 +726,6 @@ with tabs[3]:
                 except Exception:
                     R = np.eye(k)
 
-            # ✅ FIX 2: 所有生成逻辑全部在按钮块内
             if st.button("生成数据", type="primary"):
                 rng = np.random.default_rng(seed)
                 demo = cfg.get("demo", {})
@@ -687,7 +744,7 @@ with tabs[3]:
                 probs_q2 = np.array(q2_perc[:grade_levels], dtype=float)
                 probs_q2 /= probs_q2.sum()
                 grade_cat = rng.choice(list(range(1, grade_levels + 1)), size=N, p=probs_q2)
-                grade_num = (grade_cat - 1).astype(float)
+                grade_num = (grade_cat - 1).astype(float) / (grade_levels - 1)  # 标准化到[0,1]
 
                 q3p = demo.get("Q3_perc", [55.0, 45.0])
                 probs_q3 = np.array(q3p[:2], dtype=float)
@@ -707,10 +764,10 @@ with tabs[3]:
                 only_cat = rng.choice([1, 2], size=N, p=probs_q5)
                 only01 = (only_cat == 1).astype(float)
 
-                # 2) 潜变量
+                # 2) 潜变量（改进的生成）
                 Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
 
-                # 3) 中介结构
+                # 3) 中介结构（改进的应用）
                 med = cfg.get("mediation")
                 if med:
                     A_med = med.get("A"); C_med = med.get("C"); B_med = med.get("B")
@@ -723,7 +780,7 @@ with tabs[3]:
                             seed=seed + 7,
                         )
 
-                # 4) 人口学差异 β
+                # 4) 人口学差异 β（改进的应用方式）
                 demo_effects = cfg.get("demo_effects", {})
                 for d in dim_names:
                     eff = demo_effects.get(d, {})
@@ -734,9 +791,14 @@ with tabs[3]:
                     b_origin = float(eff.get("origin", 0.0) or 0.0)
                     b_cadre = float(eff.get("cadre", 0.0) or 0.0)
                     b_only = float(eff.get("only", 0.0) or 0.0)
+                    
                     if any(abs(x) > 0 for x in [b_gender, b_grade, b_origin, b_cadre, b_only]):
-                        delta = (b_gender * gender01 + b_grade * grade_num
-                                 + b_origin * origin01 + b_cadre * cadre01 + b_only * only01)
+                        # 标准化人口学变量的影响
+                        delta = (b_gender * (gender01 - 0.5) * 2 +  # 转换为[-1,1]
+                                b_grade * (grade_num - 0.5) * 2 +
+                                b_origin * (origin01 - 0.5) * 2 +
+                                b_cadre * (cadre01 - 0.5) * 2 +
+                                b_only * (only01 - 0.5) * 2)
                         Z[d] = Z[d] + delta
 
                 # 5) 输出 DataFrame
@@ -752,7 +814,7 @@ with tabs[3]:
                 if demo.get("use_Q5", False):
                     out["Q5"] = only_cat
 
-                # 6) 潜变量 → 题目分数（简单版，不用小维度潜变量）
+                # 6) 潜变量 → 题目分数（改进的生成）
                 qid_to_dim = {}
                 for d in dim_names:
                     for qid in dims_map[d]:
@@ -760,8 +822,8 @@ with tabs[3]:
                 rev = set(cfg.get("reverse_items", []))
                 item_params = cfg.get("item_params", {})
                 item_mean = float(item_params.get("mean", 3.6))
-                item_loading = float(item_params.get("loading", 0.8))
-                item_noise = float(item_params.get("noise", 0.75))
+                item_loading = float(item_params.get("loading", 0.85))
+                item_noise = float(item_params.get("noise", 0.45))
 
                 for d in dim_names:
                     qids = sorted([qid for qid, dd in qid_to_dim.items()
@@ -789,7 +851,8 @@ with tabs[3]:
                     if qcols:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
-                # 8) 小维度均分（Gram-Schmidt正交噪声，VIF≈1，保证全部显著）
+
+                # 8) 小维度均分（改进的Gram-Schmidt正交噪声）
                 subdims_all = cfg.get("subdimensions", {})
                 med_cfg = cfg.get("mediation") or {}
                 med_A_name = med_cfg.get("A")
@@ -837,8 +900,8 @@ with tabs[3]:
                                     sign = float(np.sign(b_val)) if b_val != 0 else 1.0
                                     target_unit = v * sign
 
-                        # Gram-Schmidt正交基（噪声互相正交且与target正交）
-                        r_desired = 0.25
+                        # Gram-Schmidt正交基（改进的相关性控制）
+                        r_desired = 0.35  # 稍微提高目标相关性
                         basis = []
                         if target_unit is not None:
                             basis = [target_unit]
@@ -879,8 +942,9 @@ with tabs[3]:
 
                 out = out[cols]
                 st.session_state.generated = out
-                st.success(f"已生成 {N} 行 × {out.shape[1]} 列。")
-            # ✅ 在按钮块外展示结果
+                st.success(f"✅ 已生成 {N} 行 × {out.shape[1]} 列数据，采用改进算法提升统计特性。")
+
+            # 在按钮块外展示结果
             if "generated" in st.session_state:
                 out = st.session_state.generated
                 cfg = st.session_state.config

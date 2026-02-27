@@ -439,23 +439,10 @@ def generate_data_with_subdims(cfg, qs):
             out[f"{d}_mean"] = out[qcols].mean(axis=1)
             cols.append(f"{d}_mean")
 
-    # ---------- 7) 小维度均值（真·算术平均，不再做二次设计） ----------
-    subdims_all = cfg.get("subdimensions", {})
-    if isinstance(subdims_all, dict):
-        for big_dim, subdict in subdims_all.items():
-            if not isinstance(subdict, dict):
-                continue
-            for sub_name, sub_qids in subdict.items():
-                if not sub_qids:
-                    continue
-                qcols = [f"Q{qid}" for qid in sub_qids
-                         if f"Q{qid}" in out.columns and qid >= scale_start_qid]
-                if not qcols:
-                    continue
-                safe_sub = re.sub(r"\W+", "", sub_name)
-                col_name = f"{big_dim}_{safe_sub}_mean"
-                out[col_name] = out[qcols].mean(axis=1)
-                cols.append(col_name)
+    # ---------- 7)（取消）小维度均值 ----------
+    # 现在不再用 cfg["subdimensions"] 生成额外的小维度均分，
+    # 每个“小维度”直接作为一个维度写在 cfg["dimensions"] 里即可。
+    # 如果想自己在 SPSS 里再拼总分，可以后处理。
 
     # 最终列顺序
     out = out[cols]
@@ -625,52 +612,6 @@ with tabs[1]:
                     new_dims[name] = sorted(set(items))
             cfg["dimensions"] = new_dims
 
-        # --- 小维度设置 ---
-        st.markdown("### 小维度设置（可选，大维度内部再分）")
-        st.caption("每个大维度下可以再划分若干小维度。每行格式：小维度名称:题号,题号,题号")
-
-        subdims_all = cfg.get("subdimensions", {})
-        if not isinstance(subdims_all, dict):
-            subdims_all = {}
-        new_subdims_all = {}
-
-        for big_dim, qids_big in cfg["dimensions"].items():
-            with st.expander(f"大维度「{big_dim}」的小维度设置", expanded=False):
-                exist_sub = subdims_all.get(big_dim, {})
-                lines = []
-                for sub_name, qids in exist_sub.items():
-                    if qids:
-                        lines.append(f"{sub_name}:{','.join(str(q) for q in qids)}")
-                txt = st.text_area(
-                    "每行一个小维度（示例：行为拖延:6,7,8,9,10）",
-                    value="\n".join(lines),
-                    key=f"subdim_text_{big_dim}",
-                    height=120,
-                )
-                sub_dict = {}
-                for line in txt.splitlines():
-                    line = line.strip().replace("：", ":").replace("，", ",")
-                    if not line or ":" not in line:
-                        continue
-                    name_part, q_part = line.split(":", 1)
-                    sub_name = name_part.strip()
-                    if not sub_name:
-                        continue
-                    qid_list_tmp = []
-                    for token in q_part.split(","):
-                        token = token.strip()
-                        if token.isdigit():
-                            q_val = int(token)
-                            if q_val in qids_big:
-                                qid_list_tmp.append(q_val)
-                    if qid_list_tmp:
-                        sub_dict[sub_name] = sorted(set(qid_list_tmp))
-                new_subdims_all[big_dim] = sub_dict
-                if sub_dict:
-                    st.info("当前小维度配置：\n" + "\n".join([f"{k}: {v}" for k, v in sub_dict.items()]))
-                else:
-                    st.info("当前未设置小维度。")
-        cfg["subdimensions"] = new_subdims_all
 
         # --- 人口学变量设置 ---
         st.markdown("### 人口学变量设置")

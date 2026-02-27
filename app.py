@@ -789,7 +789,7 @@ with tabs[3]:
                     if qcols:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
-                # 8) 小维度均分（精确相关法，严格保证t≈4，p<0.001）
+                # 8) 小维度均分（正交重组法，精确保证corr=0.20，p<0.001）
                 subdims_all = cfg.get("subdimensions", {})
                 med_cfg = cfg.get("mediation") or {}
                 med_A_name = med_cfg.get("A")
@@ -806,11 +806,10 @@ with tabs[3]:
                         if not sub_names:
                             continue
 
-                        # 确定目标信号（标准化）
+                        # 确定目标信号（已是均分列，直接用）
                         target_std = None
                         t_sign = 1.0
                         if big_dim == med_A_name:
-                            # A小维度同时对C和B显著：用C和B的合成信号
                             vecs = []
                             if med_C_name and f"{med_C_name}_mean" in out.columns:
                                 tc = out[f"{med_C_name}_mean"].to_numpy().astype(float)
@@ -831,25 +830,6 @@ with tabs[3]:
                                 target_std = (tb - tb.mean()) / (tb.std() + 1e-8)
                                 t_sign = float(np.sign(b_val)) if b_val != 0 else 1.0
 
-                        # Gram-Schmidt 正交噪声基底
-                        orth_bases = []
-                        for si, sub_name in enumerate(sub_names):
-                            rng_sub = np.random.default_rng(seed + abs(hash(sub_name)) % 99999)
-                            v = rng_sub.standard_normal(N)
-                            v = (v - v.mean()) / (v.std() + 1e-8)
-                            for prev in orth_bases:
-                                v = v - np.dot(v, prev) / (np.dot(prev, prev) + 1e-8) * prev
-                            v = (v - v.mean()) / (v.std() + 1e-8)
-                            orth_bases.append(v)
-
-                        # 人口学效应
-                        eff = demo_effects.get(big_dim, {})
-                        demo_delta = (float(eff.get("gender", 0) or 0) * gender01
-                                      + float(eff.get("grade", 0) or 0) * grade_num
-                                      + float(eff.get("origin", 0) or 0) * origin01
-                                      + float(eff.get("cadre", 0) or 0) * cadre01
-                                      + float(eff.get("only", 0) or 0) * only01)
-
                         for si, sub_name in enumerate(sub_names):
                             if not subdict[sub_name]:
                                 continue
@@ -862,16 +842,26 @@ with tabs[3]:
                             raw_mean = out[qcols].mean(axis=1).to_numpy().astype(float)
 
                             if target_std is not None:
-                                # 精确公式：corr(sub, target) = r_target = 0.15
-                                # t = 0.15 * sqrt(N-2) / sqrt(1-0.15²) ≈ 3.8，p<0.001
-                                r_target = 0.15
-                                sub_std = (t_sign * r_target * target_std
-                                           + math.sqrt(1 - r_target ** 2) * orth_bases[si])
-                                # sub_std与target的相关精确等于r_target
-                                sub_final = sub_std * raw_mean.std() + raw_mean.mean()
-                                sub_final = sub_final + demo_delta * item_loading
+                                # 正交重组：保留raw_mean中与target无关的成分，精确设定相关
+                                raw_std_arr = (raw_mean - raw_mean.mean()) / (raw_mean.std() + 1e-8)
+                                proj = np.dot(raw_std_arr, target_std) / (np.dot(target_std, target_std) + 1e-8)
+                                perp = raw_std_arr - proj * target_std
+                                perp_std = perp.std()
+                                if perp_std > 1e-8:
+                                    perp = (perp - perp.mean()) / perp_std
+                                else:
+                                    rng_fb = np.random.default_rng(seed + si + abs(hash(sub_name)) % 9999)
+                                    perp = rng_fb.standard_normal(N)
+                                    perp = (perp - perp.mean()) / (perp.std() + 1e-8)
+
+                                # r=0.20 → t=5.1(N=630), p<0.001; VIF=1+r²*(k-1)≈1.24
+                                r_desired = t_sign * 0.20
+                                sub_new_std = (r_desired * target_std
+                                               + math.sqrt(max(1 - r_desired ** 2, 1e-6)) * perp)
+                                # 还原到原始量纲（保留均值和标准差）
+                                sub_final = sub_new_std * raw_mean.std() + raw_mean.mean()
                             else:
-                                sub_final = raw_mean + demo_delta * item_loading
+                                sub_final = raw_mean.copy()
 
                             out[col_name] = sub_final
                             cols.append(col_name)

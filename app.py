@@ -789,7 +789,7 @@ with tabs[3]:
                     if qcols:
                         out[f"{d}_mean"] = out[qcols].mean(axis=1)
                         cols.append(f"{d}_mean")
-                # 8) 小维度均分（正交重组法，精确保证corr=0.20，p<0.001）
+                # 8) 小维度均分（修正版：先标准化signal，精确控制相关和t值）
                 subdims_all = cfg.get("subdimensions", {})
                 med_cfg = cfg.get("mediation") or {}
                 med_A_name = med_cfg.get("A")
@@ -806,29 +806,39 @@ with tabs[3]:
                         if not sub_names:
                             continue
 
-                        # 确定目标信号（已是均分列，直接用）
-                        target_std = None
+                        # 确定目标信号（A和C的小维度都直接用B_mean作为目标）
+                        target_raw = None
                         t_sign = 1.0
                         if big_dim == med_A_name:
-                            vecs = []
-                            if med_C_name and f"{med_C_name}_mean" in out.columns:
-                                tc = out[f"{med_C_name}_mean"].to_numpy().astype(float)
-                                tc = (tc - tc.mean()) / (tc.std() + 1e-8)
-                                vecs.append(tc * (float(np.sign(a_val)) if a_val != 0 else -1.0))
                             if med_B_name and f"{med_B_name}_mean" in out.columns:
-                                tb = out[f"{med_B_name}_mean"].to_numpy().astype(float)
-                                tb = (tb - tb.mean()) / (tb.std() + 1e-8)
-                                s_b = float(np.sign(a_val * b_val)) if a_val * b_val != 0 else 1.0
-                                vecs.append(tb * s_b)
-                            if vecs:
-                                combined = sum(vecs) / len(vecs)
-                                target_std = (combined - combined.mean()) / (combined.std() + 1e-8)
-                                t_sign = 1.0
+                                target_raw = out[f"{med_B_name}_mean"].to_numpy().astype(float)
+                                t_sign = float(np.sign(a_val * b_val)) if a_val * b_val != 0 else 1.0
+                            elif med_C_name and f"{med_C_name}_mean" in out.columns:
+                                target_raw = out[f"{med_C_name}_mean"].to_numpy().astype(float)
+                                t_sign = float(np.sign(a_val)) if a_val != 0 else 1.0
                         elif big_dim == med_C_name:
                             if med_B_name and f"{med_B_name}_mean" in out.columns:
-                                tb = out[f"{med_B_name}_mean"].to_numpy().astype(float)
-                                target_std = (tb - tb.mean()) / (tb.std() + 1e-8)
+                                target_raw = out[f"{med_B_name}_mean"].to_numpy().astype(float)
                                 t_sign = float(np.sign(b_val)) if b_val != 0 else 1.0
+
+                        # ★ 关键修正：目标向量必须标准化到单位方差
+                        if target_raw is not None:
+                            target_std_val = target_raw.std()
+                            if target_std_val > 1e-8:
+                                target_unit = (target_raw - target_raw.mean()) / target_std_val
+                            else:
+                                target_raw = None
+                                target_unit = None
+                        else:
+                            target_unit = None
+
+                        # 人口学效应
+                        eff = demo_effects.get(big_dim, {})
+                        demo_delta = (float(eff.get("gender", 0) or 0) * gender01
+                                      + float(eff.get("grade", 0) or 0) * grade_num
+                                      + float(eff.get("origin", 0) or 0) * origin01
+                                      + float(eff.get("cadre", 0) or 0) * cadre01
+                                      + float(eff.get("only", 0) or 0) * only01)
 
                         for si, sub_name in enumerate(sub_names):
                             if not subdict[sub_name]:
@@ -841,27 +851,31 @@ with tabs[3]:
                             col_name = f"{big_dim}_{safe_sub}_mean"
                             raw_mean = out[qcols].mean(axis=1).to_numpy().astype(float)
 
-                            if target_std is not None:
-                                # 正交重组：保留raw_mean中与target无关的成分，精确设定相关
-                                raw_std_arr = (raw_mean - raw_mean.mean()) / (raw_mean.std() + 1e-8)
-                                proj = np.dot(raw_std_arr, target_std) / (np.dot(target_std, target_std) + 1e-8)
-                                perp = raw_std_arr - proj * target_std
-                                perp_std = perp.std()
-                                if perp_std > 1e-8:
-                                    perp = (perp - perp.mean()) / perp_std
+                            if target_unit is not None:
+                                # 生成与target_unit正交的噪声
+                                rng_sub = np.random.default_rng(seed + si + abs(hash(sub_name)) % 99999)
+                                noise = rng_sub.standard_normal(N)
+                                noise = noise - np.dot(noise, target_unit) / (np.dot(target_unit, target_unit) + 1e-8) * target_unit
+                                noise_std = noise.std()
+                                if noise_std > 1e-8:
+                                    noise = (noise - noise.mean()) / noise_std
                                 else:
-                                    rng_fb = np.random.default_rng(seed + si + abs(hash(sub_name)) % 9999)
-                                    perp = rng_fb.standard_normal(N)
-                                    perp = (perp - perp.mean()) / (perp.std() + 1e-8)
+                                    noise = rng_sub.standard_normal(N)
+                                    noise = (noise - noise.mean()) / (noise.std() + 1e-8)
 
-                                # r=0.20 → t=5.1(N=630), p<0.001; VIF=1+r²*(k-1)≈1.24
-                                r_desired = t_sign * 0.20
-                                sub_new_std = (r_desired * target_std
-                                               + math.sqrt(max(1 - r_desired ** 2, 1e-6)) * perp)
-                                # 还原到原始量纲（保留均值和标准差）
-                                sub_final = sub_new_std * raw_mean.std() + raw_mean.mean()
+                                # r=0.16 → t≈4.0 (N=630)，精确在1-5范围内
+                                r_desired = t_sign * 0.16
+                                sub_new = r_desired * target_unit + math.sqrt(max(1 - r_desired**2, 1e-8)) * noise
+                                # 还原到原始量纲
+                                raw_std = raw_mean.std()
+                                raw_mu = raw_mean.mean()
+                                if raw_std > 1e-8:
+                                    sub_final = sub_new * raw_std + raw_mu
+                                else:
+                                    sub_final = sub_new + raw_mu
+                                sub_final = sub_final + demo_delta * item_loading
                             else:
-                                sub_final = raw_mean.copy()
+                                sub_final = raw_mean + demo_delta * item_loading
 
                             out[col_name] = sub_final
                             cols.append(col_name)

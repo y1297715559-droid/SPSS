@@ -809,9 +809,9 @@ with tabs[3]:
                         # 确定目标列（直接用已生成的均分列，不重新标准化合并）
                         target_col = None
                         t_sign = 1.0
-                        if big_dim == med_A_name and med_B_name and f"{med_B_name}_mean" in out.columns:
-                            target_col = f"{med_B_name}_mean"
-                            t_sign = float(np.sign(a_val * b_val)) if a_val * b_val != 0 else 1.0
+                        if big_dim == med_A_name and med_C_name and f"{med_C_name}_mean" in out.columns:
+                            target_col = f"{med_C_name}_mean"
+                            t_sign = float(np.sign(a_val)) if a_val != 0 else 1.0
                         elif big_dim == med_C_name and med_B_name and f"{med_B_name}_mean" in out.columns:
                             target_col = f"{med_B_name}_mean"
                             t_sign = float(np.sign(b_val)) if b_val != 0 else 1.0

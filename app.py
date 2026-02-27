@@ -794,20 +794,15 @@ with tabs[1]:
 
         cfg["item_params"] = item_params
 
+        # 反向题设置
         rev_txt = st.text_input(
             "反向题题号（逗号分隔）",
             value=",".join(map(str, cfg.get("reverse_items", []))) if cfg.get("reverse_items") else "",
             help="例如：8,12,15 表示这些题目在 1~5 上按 1↔5 反向计分。",
         )
-        cfg["reverse_items"] = [int(x.strip()) for x in rev_txt.split(",") if x.strip().isdigit()]
-
-        if st.button("保存当前配置", type="primary"):
-            st.session_state.config = cfg
-            st.success("配置已保存！")
-            value=",".join(map(str, cfg.get("reverse_items", []))) if cfg.get("reverse_items") else "",
-            help="例如：8,12,15 表示这些题目在 1~5 上按 1↔5 反向计分。",
-        )
-        cfg["reverse_items"] = [int(x.strip()) for x in rev_txt.split(",") if x.strip().isdigit()]
+        cfg["reverse_items"] = [
+            int(x.strip()) for x in rev_txt.split(",") if x.strip().isdigit()
+        ]
 
         if st.button("保存当前配置", type="primary"):
             st.session_state.config = cfg

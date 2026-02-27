@@ -807,14 +807,31 @@ with tabs[3]:
                             continue
 
                         # 确定目标列（直接用已生成的均分列，不重新标准化合并）
+                        # 确定目标列
                         target_col = None
                         t_sign = 1.0
-                        if big_dim == med_A_name and med_C_name and f"{med_C_name}_mean" in out.columns:
-                            target_col = f"{med_C_name}_mean"
-                            t_sign = float(np.sign(a_val)) if a_val != 0 else 1.0
-                        elif big_dim == med_C_name and med_B_name and f"{med_B_name}_mean" in out.columns:
-                            target_col = f"{med_B_name}_mean"
-                            t_sign = float(np.sign(b_val)) if b_val != 0 else 1.0
+                        target_unit = None
+
+                        if big_dim == med_A_name:
+                            # ★ A小维度：合并A_mean和C_mean作为目标，保证两个方向都显著
+                            vecs = []
+                            if f"{med_A_name}_mean" in out.columns:
+                                am = out[f"{med_A_name}_mean"].to_numpy().astype(float)
+                                vecs.append((am - am.mean()) / (am.std() + 1e-8))
+                            if med_C_name and f"{med_C_name}_mean" in out.columns:
+                                cm = out[f"{med_C_name}_mean"].to_numpy().astype(float)
+                                vecs.append((cm - cm.mean()) / (cm.std() + 1e-8) * (np.sign(a_val) if a_val != 0 else 1.0))
+                            if vecs:
+                                combined = sum(vecs) / len(vecs)
+                                combined_std = combined.std()
+                                if combined_std > 1e-8:
+                                    target_unit = (combined - combined.mean()) / combined_std
+
+                        elif big_dim == med_C_name:
+                            if med_B_name and f"{med_B_name}_mean" in out.columns:
+                                bm = out[f"{med_B_name}_mean"].to_numpy().astype(float)
+                                target_unit = (bm - bm.mean()) / (bm.std() + 1e-8)
+                                t_sign = float(np.sign(b_val)) if b_val != 0 else 1.0
 
                         for si, sub_name in enumerate(sub_names):
                             if not subdict[sub_name]:
@@ -841,7 +858,7 @@ with tabs[3]:
                                 noise = (noise - noise.mean()) / (noise.std() + 1e-8)
 
                                 # r=0.16 → t=4.0(N=630) p<0.001，严格保证显著
-                                r = t_sign * 0.25
+                                r = t_sign * 0.28
                                 sub_z = r * target_z + math.sqrt(max(1 - r**2, 1e-8)) * noise
 
                                 # 还原量纲，不加任何额外项

@@ -45,7 +45,47 @@ except Exception:
 
 st.set_page_config(page_title="问卷解析 + 维度/关系约束 + SPSS数据生成器（本地网页）", layout="wide")
 
+# ---------- 可靠性分析函数 ----------
+def cronbach_alpha(data):
+    """计算Cronbach's α系数"""
+    if isinstance(data, pd.DataFrame):
+        data = data.values
+    
+    data = np.array(data, dtype=float)
+    data = data[~np.isnan(data).any(axis=1)]
+    
+    if data.shape[0] < 2 or data.shape[1] < 2:
+        return np.nan
+    
+    k = data.shape[1]
+    item_variances = np.var(data, axis=0, ddof=1)
+    total_scores = np.sum(data, axis=1)
+    total_variance = np.var(total_scores, ddof=1)
+    
+    if total_variance == 0:
+        return np.nan
+    
+    alpha = (k / (k - 1)) * (1 - np.sum(item_variances) / total_variance)
+    return alpha
 
+def calculate_reliability_for_dimension(data, item_columns):
+    """计算特定维度的可靠性"""
+    if len(item_columns) < 2:
+        return {"alpha": np.nan, "n_items": len(item_columns), "message": "题目数量不足"}
+    
+    dim_data = data[item_columns].dropna()
+    
+    if dim_data.shape[0] < 2:
+        return {"alpha": np.nan, "n_items": len(item_columns), "message": "有效样本不足"}
+    
+    alpha = cronbach_alpha(dim_data)
+    
+    return {
+        "alpha": alpha,
+        "n_items": len(item_columns),
+        "n_cases": dim_data.shape[0],
+        "message": "计算成功"
+    }
 # ---------- 改进的基础函数 ----------
 
 def parse_survey_text(txt: str):
@@ -143,32 +183,45 @@ def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
     return df_latents
 
 
-def latent_to_items(latent, n_items, mean=3.6, loading=0.85, noise=0.45, seed=42):
-    """改进的题目生成函数，提高可靠性和相关性"""
+def latent_to_items(latent, n_items, mean=3.5, loading=0.88, noise=0.35, seed=42):
+    """改进的题目生成函数，专门优化可靠性"""
     rng = np.random.default_rng(seed)
     n = len(latent)
     
     # 标准化潜变量
     latent_std = (latent - latent.mean()) / (latent.std() + 1e-8)
     
-    # 生成题目特异性因子（每个题目有独特的难度和区分度）
-    item_difficulties = rng.normal(0, 0.3, n_items)  # 题目难度差异
-    item_loadings = rng.normal(loading, 0.05, n_items)  # 载荷略有差异
-    item_loadings = np.clip(item_loadings, 0.7, 0.95)  # 确保高载荷
+    # 关键改进1: 减少题目间的差异，提高一致性
+    item_difficulties = rng.normal(0, 0.15, n_items)  # 从0.3改为0.15
+    
+    # 关键改进2: 提高因子载荷并减少载荷变异
+    base_loading = max(0.85, loading)
+    item_loadings = rng.normal(base_loading, 0.02, n_items)  # 从0.05改为0.02
+    item_loadings = np.clip(item_loadings, 0.82, 0.95)
+    
+    # 关键改进3: 添加共同因子以增强题目间相关性
+    common_factor = rng.standard_normal(n)
+    common_loading = 0.15
     
     # 生成题目分数
     items = np.zeros((n, n_items))
     for i in range(n_items):
-        # 真分数 = 载荷 * 潜变量 + 难度参数
-        true_score = item_loadings[i] * latent_std + item_difficulties[i]
+        # 真分数 = 主因子载荷 * 潜变量 + 共同因子 + 难度参数
+        true_score = (item_loadings[i] * latent_std + 
+                     common_loading * common_factor + 
+                     item_difficulties[i])
         
-        # 添加测量误差
-        error_var = 1.0 - item_loadings[i] ** 2
+        # 关键改进4: 减少测量误差
+        error_var = max(0.05, 1.0 - item_loadings[i] ** 2 - common_loading ** 2)
         error = rng.normal(0, math.sqrt(error_var * noise * noise), n)
         
         # 连续分数转换为1-5量表
         continuous_score = mean + true_score + error
-        items[:, i] = np.clip(np.round(continuous_score), 1, 5)
+        
+        # 关键改进5: 使用更平滑的转换
+        percentiles = np.percentile(continuous_score, [10, 30, 50, 70, 90])
+        items[:, i] = np.digitize(continuous_score, percentiles) + 1
+        items[:, i] = np.clip(items[:, i], 1, 5)
     
     return items.astype(int)
 
@@ -230,6 +283,7 @@ tabs = st.tabs(
         "2) 维度与计分 & 人口学",
         "3) 关系约束（人口学差异/相关/中介）",
         "4) 生成与导出",
+        "5) 📊 可靠性分析",
     ]
 )
 
@@ -295,7 +349,7 @@ with tabs[1]:
                     "Q4_perc": [28.0, 72.0],
                     "Q5_perc": [38.0, 62.0],
                 },
-                "item_params": {"mean": 3.60, "loading": 0.85, "noise": 0.45},  # 改进的默认参数
+                "item_params": {"mean": 3.5, "loading": 0.88, "noise": 0.35},  # 改进的默认参数
                 "corr_matrix": None,
                 "mediation": {
                     "A": "A_dim", "C": "A_dim", "B": "A_dim",
@@ -347,6 +401,17 @@ with tabs[1]:
                 st.text_input("维度名称", value=orig_name, key=f"dim_name_{i}")
                 valid_default = [qid for qid in qid_list if qid in scale_qids]
                 st.multiselect("包含题目（可多选）", options=scale_qids, default=valid_default, key=f"dim_items_{i}")
+                                # 实时显示题目数量和可靠性预估
+                selected_items = st.session_state.get(f"dim_items_{i}", valid_default)
+                if len(selected_items) > 0:
+                    reliability_est = min(0.95, 0.4 + 0.05 * len(selected_items))
+                    
+                    if len(selected_items) >= 6:
+                        st.success(f"✅ {len(selected_items)}个题目，预估α≈{reliability_est:.2f}")
+                    elif len(selected_items) >= 4:
+                        st.warning(f"⚠️ {len(selected_items)}个题目，预估α≈{reliability_est:.2f}，建议增加到6个")
+                    else:
+                        st.error(f"❌ {len(selected_items)}个题目，可靠性可能不足，强烈建议增加题目")
                 if st.button("删除本维度", key=f"dim_del_{i}"):
                     delete_keys.append(orig_name)
 
@@ -943,6 +1008,55 @@ with tabs[3]:
                 out = out[cols]
                 st.session_state.generated = out
                 st.success(f"✅ 已生成 {N} 行 × {out.shape[1]} 列数据，采用改进算法提升统计特性。")
+                                # 实时可靠性检查
+                st.markdown("### 📊 实时可靠性检查")
+                reliability_results = {}
+                all_qualified = True
+                
+                reliability_summary = []
+                for d in dim_names:
+                    qcols = [f"Q{qid}" for qid in dims_map[d] if f"Q{qid}" in out.columns]
+                    if len(qcols) >= 2:
+                        result = calculate_reliability_for_dimension(out, qcols)
+                        reliability_results[d] = result
+                        
+                        alpha = result["alpha"]
+                        n_items = result["n_items"]
+                        
+                        if not np.isnan(alpha):
+                            if alpha >= 0.75:
+                                status = "✅ 达标"
+                            else:
+                                status = "❌ 不足"
+                                all_qualified = False
+                            
+                            reliability_summary.append({
+                                "维度": d,
+                                "题目数": n_items,
+                                "Cronbach's α": f"{alpha:.3f}",
+                                "状态": status
+                            })
+                        else:
+                            reliability_summary.append({
+                                "维度": d,
+                                "题目数": n_items,
+                                "Cronbach's α": "计算失败",
+                                "状态": "❌ 错误"
+                            })
+                            all_qualified = False
+                
+                if reliability_summary:
+                    summary_df = pd.DataFrame(reliability_summary)
+                    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                    
+                    qualified_count = sum(1 for r in reliability_summary if "✅" in r["状态"])
+                    total_count = len(reliability_summary)
+                    
+                    if all_qualified and reliability_results:
+                        st.balloons()
+                        st.success(f"🎉 恭喜！所有 {total_count} 个维度可靠性均达标！")
+                    else:
+                        st.warning(f"⚠️ {qualified_count}/{total_count} 个维度达标")
 
             # 在按钮块外展示结果
             if "generated" in st.session_state:
@@ -1128,3 +1242,123 @@ with tabs[3]:
                             pass
                 else:
                     st.info("未安装 pyreadstat：可以用 CSV + .sps 在 SPSS 中导入，效果相同。")
+                                    else:
+                    st.info("未安装 pyreadstat：可以用 CSV + .sps 在 SPSS 中导入，效果相同。")
+
+# ---------- Tab 5 - 可靠性分析 ----------
+with tabs[4]:
+    st.subheader("📊 详细可靠性分析")
+    
+    if "generated" not in st.session_state:
+        st.info("请先到第4页生成数据")
+    else:
+        out = st.session_state.generated
+        cfg = st.session_state.config
+        dims_map = cfg.get("dimensions", {})
+        
+        if not dims_map:
+            st.warning("没有找到维度配置")
+        else:
+            st.markdown("### 🎯 各维度详细分析")
+            
+            overall_summary = []
+            
+            for dim_name, qids in dims_map.items():
+                qcols = [f"Q{qid}" for qid in qids if f"Q{qid}" in out.columns]
+                
+                if len(qcols) < 2:
+                    st.warning(f"维度「{dim_name}」题目不足")
+                    continue
+                
+                result = calculate_reliability_for_dimension(out, qcols)
+                alpha = result["alpha"]
+                
+                if np.isnan(alpha):
+                    st.error(f"维度「{dim_name}」计算失败")
+                    continue
+                
+                # 判断等级
+                if alpha >= 0.9:
+                    level = "🟢 优秀"
+                elif alpha >= 0.8:
+                    level = "🟢 良好"
+                elif alpha >= 0.75:
+                    level = "🟡 可接受"
+                else:
+                    level = "🔴 不足"
+                
+                overall_summary.append({
+                    "维度": dim_name,
+                    "题目数": len(qcols),
+                    "Cronbach's α": f"{alpha:.3f}",
+                    "等级": level
+                })
+                
+                # 详细分析
+                with st.expander(f"📋 {dim_name} - α = {alpha:.3f}", expanded=alpha < 0.75):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Cronbach's α", f"{alpha:.3f}")
+                    with col2:
+                        st.metric("题目数量", len(qcols))
+                    with col3:
+                        st.metric("有效样本", result["n_cases"])
+                    
+                    # 改进建议
+                    if alpha < 0.75:
+                        st.error("⚠️ **改进建议：**")
+                        suggestions = []
+                        
+                        if len(qcols) < 6:
+                            suggestions.append(f"• 增加题目数量（当前{len(qcols)}个，建议至少6个）")
+                        
+                        current_params = cfg.get("item_params", {})
+                        current_loading = current_params.get("loading", 0.85)
+                        current_noise = current_params.get("noise", 0.45)
+                        
+                        if current_loading < 0.85:
+                            suggestions.append(f"• 提高因子载荷（当前{current_loading}，建议≥0.85）")
+                        
+                        if current_noise > 0.4:
+                            suggestions.append(f"• 降低噪声水平（当前{current_noise}，建议≤0.4）")
+                        
+                        suggestions.append("• 重新生成数据并检查结果")
+                        
+                        for suggestion in suggestions:
+                            st.markdown(suggestion)
+                    else:
+                        st.success("✅ 该维度可靠性达标！")
+            
+            # 汇总表
+            if overall_summary:
+                st.markdown("### 📈 可靠性汇总")
+                summary_df = pd.DataFrame(overall_summary)
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                
+                # 达标统计
+                total_dims = len(overall_summary)
+                qualified_dims = sum(1 for item in overall_summary 
+                                   if float(item["Cronbach's α"]) >= 0.75)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("总维度数", total_dims)
+                with col2:
+                    st.metric("达标维度", qualified_dims)
+                with col3:
+                    st.metric("达标率", f"{qualified_dims/total_dims*100:.1f}%")
+                
+                if qualified_dims == total_dims:
+                    st.balloons()
+                    st.success("🎉 恭喜！所有维度可靠性均达到0.75以上！")
+                else:
+                    st.warning(f"还有 {total_dims - qualified_dims} 个维度需要改进")
+            
+            # 快速改进按钮
+            st.markdown("### ⚡ 快速改进")
+            if st.button("🔧 应用高可靠性参数", use_container_width=True):
+                cfg["item_params"]["loading"] = 0.88
+                cfg["item_params"]["noise"] = 0.35
+                cfg["item_params"]["mean"] = 3.5
+                st.session_state.config = cfg
+                st.success("✅ 已应用高可靠性参数，请返回第4页重新生成数据")

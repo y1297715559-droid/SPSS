@@ -132,26 +132,26 @@ def generate_latents(n, dim_names, corr_matrix=None, seed=42):
     else:
         R = np.array(corr_matrix, dtype=float)
         # 确保矩阵对称且正定
-        R = (R + R.T) / 2.0
-        np.fill_diagonal(R, 1.0)
+        R = (R + R.T) / 2.0  # 保证对称性
+        np.fill_diagonal(R, 1.0)  # 保证对角线为1
         
         # 使用特征值分解确保正定性
         w, V = np.linalg.eigh(R)
         w = np.maximum(w, 1e-6)  # 确保所有特征值为正
-        R_psd = V @ np.diag(w) @ V.T
+        R_psd = V @ np.diag(w) @ V.T  # 重建正定矩阵
         
-        # Cholesky分解
+        # 使用Cholesky分解验证和修正
         try:
             L = np.linalg.cholesky(R_psd)
         except np.linalg.LinAlgError:
             # 如果Cholesky失败，使用SVD
             U, s, Vt = np.linalg.svd(R_psd)
-            s = np.maximum(s, 1e-6)
-            L = U @ np.diag(np.sqrt(s))
+            s = np.maximum(s, 1e-6)  # 修正特征值
+            L = U @ np.diag(np.sqrt(s))  # 用SVD替代
         
         # 生成相关的标准正态变量
         Z_indep = rng.standard_normal(size=(n, k))
-        Z = Z_indep @ L.T
+        Z = Z_indep @ L.T  # 将独立的标准正态变量转化为相关变量
     
     return pd.DataFrame(Z, columns=dim_names)
 
@@ -889,8 +889,8 @@ with tabs[2]:
             M = df_corr_edit.values.astype(float)
             for i in range(k):
                 M[i, i] = 1.0
-            M = (M + M.T) / 2.0
-            M = np.clip(M, -0.85, 0.85)  # 稍微放宽限制
+            M = (M + M.T) / 2.0  # 确保矩阵是对称的
+            np.fill_diagonal(M, 1.0)  # 强制将对角线设为1
             cfg["corr_matrix"] = M.tolist()
 
             st.markdown("### 中介：A→C→B（路径可正可负）")

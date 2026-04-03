@@ -933,7 +933,7 @@ with tabs[2]:
             np.fill_diagonal(M, 1.0)  # 强制将对角线设为1
             cfg["corr_matrix"] = M.tolist()
 
-                        st.markdown("### 多自变量 → 单因变量")
+            st.markdown("### 多自变量 → 单因变量")
             st.caption("💡 选择一个因变量 Y，多个自变量 X 可自由增减；每个自变量的回归系数 β 可分别设置。")
 
             multi_reg = cfg.get("multi_regression", {})

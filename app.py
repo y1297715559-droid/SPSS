@@ -181,7 +181,45 @@ def apply_mediation(df_latents, A, C, B, a=0.6, b=0.6, cprime=0.1, seed=42):
     df_latents[B] = b * C_std + cprime * A_std + eB
     
     return df_latents
+def apply_multi_predictors(df_latents, y_dim, x_dims, betas, seed=42):
+    """
+    一个因变量 y_dim，由多个自变量 x_dims 共同预测
+    Y = b1*X1 + b2*X2 + ... + e
 
+    参数：
+    - y_dim: 因变量名（字符串）
+    - x_dims: 自变量列表，例如 ["学习动机", "社会支持"]
+    - betas: dict，例如 {"学习动机": 0.4, "社会支持": 0.3}
+    """
+    rng = np.random.default_rng(seed)
+
+    if y_dim not in df_latents.columns:
+        return df_latents
+
+    valid_xs = [x for x in x_dims if x in df_latents.columns and x != y_dim]
+    if not valid_xs:
+        return df_latents
+
+    # 标准化多个自变量
+    X = df_latents[valid_xs].copy()
+    X = (X - X.mean()) / (X.std(ddof=0) + 1e-8)
+
+    beta_vec = np.array([float(betas.get(x, 0.0)) for x in valid_xs], dtype=float)
+
+    # 多自变量线性组合
+    y_pred = X.to_numpy() @ beta_vec
+
+    # 控制结构方差，避免方差过大
+    var_pred = np.var(y_pred)
+    if var_pred > 0.95:
+        y_pred = y_pred / np.sqrt(var_pred / 0.95)
+        var_pred = np.var(y_pred)
+
+    err_var = max(1e-6, 1.0 - var_pred)
+    e = rng.standard_normal(len(df_latents)) * np.sqrt(err_var)
+
+    df_latents[y_dim] = y_pred + e
+    return df_latents
 
 def latent_to_items(latent, n_items, mean=3.5, loading=0.60, noise=1.00, seed=42):
     """
@@ -342,18 +380,19 @@ def generate_data_with_subdims(cfg, qs):
     # 利用你已有的 generate_latents
     Z = generate_latents(N, dim_names, corr_matrix=R, seed=seed)
 
-    # ---------- 3) 应用中介结构（可选） ----------
-    med = cfg.get("mediation")
-    if med:
-        A_med = med.get("A")
-        C_med = med.get("C")
-        B_med = med.get("B")
-        if (A_med in Z.columns and C_med in Z.columns and B_med in Z.columns):
-            Z = apply_mediation(
-                Z, A_med, C_med, B_med,
-                a=float(med.get("a", 0.6)),
-                b=float(med.get("b", 0.6)),
-                cprime=float(med.get("cprime", 0.1)),
+    # ---------- 3) 应用多自变量 → 单因变量结构（可选） ----------
+    multi_reg = cfg.get("multi_regression")
+    if multi_reg:
+        y_dim = multi_reg.get("y")
+        x_dims = multi_reg.get("xs", [])
+        betas = multi_reg.get("betas", {})
+
+        if y_dim in Z.columns and isinstance(x_dims, list) and len(x_dims) > 0:
+            Z = apply_multi_predictors(
+                Z,
+                y_dim=y_dim,
+                x_dims=x_dims,
+                betas=betas,
                 seed=seed + 7,
             )
 
@@ -530,9 +569,10 @@ with tabs[1]:
                 },
                 "item_params": {"mean": 3.6, "loading": 0.80, "noise": 1.0},  # 改进的默认参数
                 "corr_matrix": None,
-                "mediation": {
-                    "A": "A_dim", "C": "A_dim", "B": "A_dim",
-                    "a": 0.6, "b": 0.6, "cprime": 0.2, "type": "部分中介",
+                "multi_regression": {
+                   "y": "A_dim",
+                   "xs": [],
+                   "betas": {},
                 },
                 "demo_effects": {
                     "A_dim": {"gender": 0.8, "grade": 0.3, "origin": 0.0, "cadre": 0.0, "only": 0.0},  # 增强效应
@@ -893,39 +933,72 @@ with tabs[2]:
             np.fill_diagonal(M, 1.0)  # 强制将对角线设为1
             cfg["corr_matrix"] = M.tolist()
 
-            st.markdown("### 中介：A→C→B（路径可正可负）")
-            st.caption("💡 建议：路径系数在 ±0.3 到 ±0.8 之间效果较好")
-            med = cfg.get("mediation", {})
-            A_default = med.get("A", dims[0])
-            C_default = med.get("C", dims[min(1, len(dims) - 1)])
-            B_default = med.get("B", dims[min(2, len(dims) - 1)])
-            if A_default not in dims: A_default = dims[0]
-            if C_default not in dims: C_default = dims[min(1, len(dims) - 1)]
-            if B_default not in dims: B_default = dims[min(2, len(dims) - 1)]
+                        st.markdown("### 多自变量 → 单因变量")
+            st.caption("💡 选择一个因变量 Y，多个自变量 X 可自由增减；每个自变量的回归系数 β 可分别设置。")
 
-            A = st.selectbox("A（自变量）", dims, index=dims.index(A_default), key="med_A")
-            C = st.selectbox("C（中介变量）", dims, index=dims.index(C_default), key="med_C")
-            B = st.selectbox("B（因变量）", dims, index=dims.index(B_default), key="med_B")
-            med_type = st.radio(
-                "中介类型", ["完全中介", "部分中介"],
-                index=1 if med.get("type", "部分中介") == "部分中介" else 0, horizontal=True,
+            multi_reg = cfg.get("multi_regression", {})
+
+            y_default = multi_reg.get("y", dims[0])
+            if y_default not in dims:
+                y_default = dims[0]
+
+            y_dim = st.selectbox(
+                "因变量 Y（只能选一个）",
+                dims,
+                index=dims.index(y_default),
+                key="multi_y"
             )
-            a_default = float(med.get("a", 0.6))
-            b_default = float(med.get("b", 0.6))
-            cprime_default = float(med.get("cprime", 0.3 if med_type == "部分中介" else 0.0))
 
-            a = st.slider("路径 a（A→C，可正可负）", -1.0, 1.0, a_default, 0.05)
-            b_path = st.slider("路径 b（C→B，可正可负）", -1.0, 1.0, b_default, 0.05)
-            cprime = 0.0
-            if med_type == "部分中介":
-                cprime = st.slider("直接效应 c'（A→B，可正可负）", -0.8, 0.8, cprime_default, 0.05)
+            x_options = [d for d in dims if d != y_dim]
+            x_default = multi_reg.get("xs", [])
+            x_default = [x for x in x_default if x in x_options]
 
-            cfg["mediation"] = {
-                "A": A, "C": C, "B": B,
-                "a": float(a), "b": float(b_path), "cprime": float(cprime), "type": med_type,
+            x_dims = st.multiselect(
+                "自变量 X（可多选，可自己增加/减少）",
+                options=x_options,
+                default=x_default,
+                key="multi_xs"
+            )
+
+            beta_dict = multi_reg.get("betas", {})
+
+            if x_dims:
+                st.markdown("#### 各自变量对因变量的回归系数 β")
+
+                beta_rows = []
+                for x in x_dims:
+                    beta_rows.append({
+                        "自变量": x,
+                        "回归系数β": float(beta_dict.get(x, 0.30))
+                    })
+
+                df_beta = pd.DataFrame(beta_rows)
+                df_beta_edit = st.data_editor(
+                    df_beta,
+                    num_rows="fixed",
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                new_betas = {}
+                for _, row in df_beta_edit.iterrows():
+                    x_name = row["自变量"]
+                    try:
+                        new_betas[x_name] = float(row["回归系数β"])
+                    except Exception:
+                        new_betas[x_name] = 0.0
+            else:
+                st.info("请至少选择 1 个自变量。")
+                new_betas = {}
+
+            cfg["multi_regression"] = {
+                "y": y_dim,
+                "xs": x_dims,
+                "betas": new_betas
             }
+
             st.session_state.config = cfg
-            st.success("已保存关系约束。")
+            st.success("已保存多自变量 → 单因变量关系约束。")
 
 
 # ---------- Tab 4 ----------

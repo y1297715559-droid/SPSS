@@ -120,7 +120,60 @@ def parse_survey_text(txt: str):
         else:
             q["scale_type"] = "categorical"
     return questions
+def get_demo_questions(qs, scale_start_qid):
+    """自动识别量表开始前的分类题，作为人口学变量"""
+    demo_qs = []
+    for q in qs:
+        if q["qid"] < scale_start_qid and q.get("scale_type") == "categorical" and q.get("options"):
+            demo_qs.append(q)
+    return demo_qs
 
+
+def normalize_percent_list(vals):
+    arr = np.array(vals, dtype=float)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    arr[arr < 0] = 0
+    if arr.sum() <= 0:
+        arr = np.ones_like(arr)
+    arr = arr / arr.sum() * 100.0
+    arr = np.round(arr, 1)
+    diff = round(100.0 - arr.sum(), 1)
+    arr[-1] = round(arr[-1] + diff, 1)
+    return arr.tolist()
+
+
+def ensure_demo_config(cfg, qs):
+    """根据当前问卷自动维护人口学配置"""
+    scale_start_qid = int(cfg.get("scale_start_qid", 6))
+    demo_qs = get_demo_questions(qs, scale_start_qid)
+
+    demo = cfg.get("demo", {})
+    enabled = demo.get("enabled", {})
+    perc_map = demo.get("perc", {})
+
+    new_enabled = {}
+    new_perc_map = {}
+
+    for q in demo_qs:
+        qkey = f"Q{q['qid']}"
+        n_opts = len(q["options"])
+
+        old_enabled = enabled.get(qkey, True)
+        old_perc = perc_map.get(qkey, None)
+
+        if not isinstance(old_perc, list) or len(old_perc) != n_opts:
+            base = round(100.0 / n_opts, 1)
+            old_perc = [base] * n_opts
+            old_perc[-1] = round(100.0 - sum(old_perc[:-1]), 1)
+
+        new_enabled[qkey] = old_enabled
+        new_perc_map[qkey] = normalize_percent_list(old_perc)
+
+    cfg["demo"] = {
+        "enabled": new_enabled,
+        "perc": new_perc_map,
+    }
+    return cfg
 
 def generate_latents(n, dim_names, corr_matrix=None, seed=42):
     """改进的潜变量生成，确保相关矩阵得到准确实现"""
@@ -324,47 +377,44 @@ def generate_data_with_subdims(cfg, qs):
     scale_start_qid = int(cfg.get("scale_start_qid", 6))
     scale_start_qid = max(min_qid, min(max_qid, scale_start_qid))
 
-    # ---------- 1) 人口学变量 ----------
+    # ---------- 1) 人口学变量（自动按问卷分类题生成） ----------
+    cfg = ensure_demo_config(cfg, qs)
     demo = cfg.get("demo", {})
+    demo_qs = get_demo_questions(qs, scale_start_qid)
 
-    # 性别
-    q1_perc = demo.get("Q1_perc", [50.0, 50.0])
-    probs_gender = np.array(q1_perc[:2], dtype=float)
-    probs_gender /= probs_gender.sum()
-    gender_cat = rng.choice([1, 2], size=N, p=probs_gender)
-    gender01 = (gender_cat == 2).astype(float)  # 女=1, 男=0
+    demo_values = {}
+    demo_scores = {}
 
-    # 年级
-    grade_levels = int(demo.get("grade_levels", 3))
-    if grade_levels not in (3, 4):
-        grade_levels = 3
-    q2_perc = demo.get("Q2_perc", [35.0, 40.0, 25.0, 0.0])
-    probs_q2 = np.array(q2_perc[:grade_levels], dtype=float)
-    probs_q2 /= probs_q2.sum()
-    grade_cat = rng.choice(list(range(1, grade_levels + 1)), size=N, p=probs_q2)
-    # 用 0~1 的连续变量表示年级高低
-    grade_num = (grade_cat - 1).astype(float) / (grade_levels - 1)
+    for q in demo_qs:
+        qid = q["qid"]
+        qkey = f"Q{qid}"
 
-    # 生源地
-    q3p = demo.get("Q3_perc", [55.0, 45.0])
-    probs_q3 = np.array(q3p[:2], dtype=float)
-    probs_q3 /= probs_q3.sum()
-    origin_cat = rng.choice([1, 2], size=N, p=probs_q3)
-    origin01 = (origin_cat == 2).astype(float)  # 农村=1, 城镇=0
+        if not demo.get("enabled", {}).get(qkey, True):
+            continue
 
-    # 班干部
-    q4p = demo.get("Q4_perc", [28.0, 72.0])
-    probs_q4 = np.array(q4p[:2], dtype=float)
-    probs_q4 /= probs_q4.sum()
-    cadre_cat = rng.choice([1, 2], size=N, p=probs_q4)
-    cadre01 = (cadre_cat == 1).astype(float)  # 班干部=1
+        n_opts = len(q["options"])
+        perc = demo.get("perc", {}).get(qkey, None)
 
-    # 独生子女
-    q5p = demo.get("Q5_perc", [38.0, 62.0])
-    probs_q5 = np.array(q5p[:2], dtype=float)
-    probs_q5 /= probs_q5.sum()
-    only_cat = rng.choice([1, 2], size=N, p=probs_q5)
-    only01 = (only_cat == 1).astype(float)  # 独生=1
+        if not isinstance(perc, list) or len(perc) != n_opts:
+            base = round(100.0 / n_opts, 1)
+            perc = [base] * n_opts
+            perc[-1] = round(100.0 - sum(perc[:-1]), 1)
+
+        perc = normalize_percent_list(perc)
+        probs = np.array(perc, dtype=float)
+        probs = probs / probs.sum()
+
+        cats = rng.choice(np.arange(1, n_opts + 1), size=N, p=probs)
+        demo_values[qkey] = cats
+
+        if n_opts == 1:
+            score = np.zeros(N)
+        elif n_opts == 2:
+            score = np.where(cats == 2, 1.0, -1.0)
+        else:
+            score = ((cats.astype(float) - 1) / (n_opts - 1) - 0.5) * 2.0
+
+        demo_scores[qkey] = score
 
     # ---------- 2) 潜变量 Z（含相关矩阵） ----------
     k = len(dim_names)
@@ -409,13 +459,12 @@ def generate_data_with_subdims(cfg, qs):
         b_only = float(eff.get("only", 0.0) or 0.0)
 
         if any(abs(x) > 0 for x in [b_gender, b_grade, b_origin, b_cadre, b_only]):
-            # 把人口学变量映射到 [-1, 1] 区间再乘系数
             delta = (
-                b_gender * (gender01 - 0.5) * 2
-                + b_grade * (grade_num - 0.5) * 2
-                + b_origin * (origin01 - 0.5) * 2
-                + b_cadre * (cadre01 - 0.5) * 2
-                + b_only * (only01 - 0.5) * 2
+                b_gender * demo_scores.get("Q1", np.zeros(N))
+                + b_grade * demo_scores.get("Q2", np.zeros(N))
+                + b_origin * demo_scores.get("Q3", np.zeros(N))
+                + b_cadre * demo_scores.get("Q4", np.zeros(N))
+                + b_only * demo_scores.get("Q5", np.zeros(N))
             )
             Z[d] = Z[d] + delta
 
@@ -423,16 +472,8 @@ def generate_data_with_subdims(cfg, qs):
     out = pd.DataFrame({"ID": np.arange(1, N + 1)})
 
     # 人口学变量写入
-    if demo.get("use_Q1", False):
-        out["Q1"] = gender_cat
-    if demo.get("use_Q2", False):
-        out["Q2"] = grade_cat
-    if demo.get("use_Q3", False):
-        out["Q3"] = origin_cat
-    if demo.get("use_Q4", False):
-        out["Q4"] = cadre_cat
-    if demo.get("use_Q5", False):
-        out["Q5"] = only_cat
+    for qkey, cats in demo_values.items():
+        out[qkey] = cats
 
     # 题目归属映射
     qid_to_dim = {}
@@ -559,13 +600,8 @@ with tabs[1]:
                 },
                 "subdimensions": {},
                 "demo": {
-                    "use_Q1": True, "use_Q2": True, "use_Q3": True, "use_Q4": True, "use_Q5": True,
-                    "Q1_perc": [50.0, 50.0],
-                    "grade_levels": 3,
-                    "Q2_perc": [35.0, 40.0, 25.0],
-                    "Q3_perc": [55.0, 45.0],
-                    "Q4_perc": [28.0, 72.0],
-                    "Q5_perc": [38.0, 62.0],
+                    "enabled": {},
+                    "perc": {},                    
                 },
                 "item_params": {"mean": 3.6, "loading": 0.80, "noise": 1.0},  # 改进的默认参数
                 "corr_matrix": None,
@@ -594,6 +630,7 @@ with tabs[1]:
             value=default_start_qid, step=1,
         )
         cfg["scale_start_qid"] = int(scale_start_qid)
+        cfg = ensure_demo_config(cfg, qs)
         scale_qids = [qid for qid in all_qids if qid >= cfg["scale_start_qid"]]
 
         # --- 维度设置 ---
@@ -653,108 +690,75 @@ with tabs[1]:
             cfg["dimensions"] = new_dims
 
 
-        # --- 人口学变量设置 ---
+        # --- 人口学变量设置（自动按问卷分类题生成） ---
         st.markdown("### 人口学变量设置")
+        cfg = ensure_demo_config(cfg, qs)
         demo = cfg.get("demo", {})
-        st.markdown("**启用以下人口学变量：**")
-        col1, col2, col3, col4, col5 = st.columns(5)
-        with col1:
-            demo["use_Q1"] = st.checkbox("性别", value=demo.get("use_Q1", True))
-        with col2:
-            demo["use_Q2"] = st.checkbox("年级", value=demo.get("use_Q2", True))
-        with col3:
-            demo["use_Q3"] = st.checkbox("生源地", value=demo.get("use_Q3", True))
-        with col4:
-            demo["use_Q4"] = st.checkbox("班干部", value=demo.get("use_Q4", True))
-        with col5:
-            demo["use_Q5"] = st.checkbox("独生子女", value=demo.get("use_Q5", True))
+        demo_qs = get_demo_questions(qs, cfg["scale_start_qid"])
 
-        st.markdown("**百分比设置：**")
+        if not demo_qs:
+            st.info("当前未识别到人口学分类题。请把人口学题放在量表题之前。")
+        else:
+            st.caption("系统会自动识别量表开始前的分类题作为人口学变量。你只需要调整比例。")
 
-        if demo.get("use_Q1", True):
-            st.markdown("**性别比例（男/女）**")
-            col1, col2 = st.columns(2)
-            with col1:
-                male_perc = st.number_input("男性比例(%)", 0.0, 100.0,
-                                            float(demo.get("Q1_perc", [50.0, 50.0])[0]), 1.0, key="male_perc")
-            with col2:
-                st.metric("女性比例(%)", f"{100.0 - male_perc:.1f}")
-            demo["Q1_perc"] = [male_perc, 100.0 - male_perc]
+            for q in demo_qs:
+                qid = q["qid"]
+                qkey = f"Q{qid}"
+                options = list(q["options"].values())
+                n_opts = len(options)
 
-        if demo.get("use_Q2", True):
-            st.markdown("**年级分布**")
-            grade_levels = st.selectbox("年级数量", [3, 4],
-                                        index=0 if demo.get("grade_levels", 3) == 3 else 1,
-                                        key="grade_levels")
-            demo["grade_levels"] = grade_levels
-            if grade_levels == 3:
-                default_perc = demo.get("Q2_perc", [35.0, 40.0, 25.0])
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    perc1 = st.number_input("大一比例(%)", 0.0, 100.0, float(default_perc[0]), 1.0, key="grade1")
-                with col2:
-                    perc2 = st.number_input("大二比例(%)", 0.0, 100.0, float(default_perc[1]), 1.0, key="grade2")
-                with col3:
-                    st.metric("大三比例(%)", f"{100.0 - perc1 - perc2:.1f}")
-                demo["Q2_perc"] = [perc1, perc2, 100.0 - perc1 - perc2]
-            else:
-                default_perc = demo.get("Q2_perc", [25.0, 30.0, 25.0, 20.0])
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    perc1 = st.number_input("大一比例(%)", 0.0, 100.0, float(default_perc[0]), 1.0, key="grade1_4")
-                with col2:
-                    perc2 = st.number_input("大二比例(%)", 0.0, 100.0, float(default_perc[1]), 1.0, key="grade2_4")
-                with col3:
-                    perc3 = st.number_input("大三比例(%)", 0.0, 100.0, float(default_perc[2]), 1.0, key="grade3_4")
-                with col4:
-                    st.metric("大四比例(%)", f"{100.0 - perc1 - perc2 - perc3:.1f}")
-                demo["Q2_perc"] = [perc1, perc2, perc3, 100.0 - perc1 - perc2 - perc3]
+                if qkey not in demo["enabled"]:
+                    demo["enabled"][qkey] = True
+                if qkey not in demo["perc"] or len(demo["perc"][qkey]) != n_opts:
+                    base = round(100.0 / n_opts, 1)
+                    tmp = [base] * n_opts
+                    tmp[-1] = round(100.0 - sum(tmp[:-1]), 1)
+                    demo["perc"][qkey] = tmp
 
-        if demo.get("use_Q3", True):
-            st.markdown("**生源地比例（城镇/农村）**")
-            col1, col2 = st.columns(2)
-            with col1:
-                urban_perc = st.number_input(
-                    "城镇比例(%)", 0.0, 100.0,
-                    float(demo.get("Q3_perc", [55.0, 45.0])[0]),
-                    1.0,
-                    key="urban_perc",
-                )
-            with col2:
-                st.metric("农村比例(%)", f"{100.0 - urban_perc:.1f}")
-            demo["Q3_perc"] = [urban_perc, 100.0 - urban_perc]
+                with st.expander(f"Q{qid}：{q['stem']}", expanded=True):
+                    demo["enabled"][qkey] = st.checkbox(
+                        "启用该人口学变量",
+                        value=demo["enabled"].get(qkey, True),
+                        key=f"enable_{qkey}"
+                    )
 
-        if demo.get("use_Q4", True):
-            st.markdown("**班干部比例（是/否）**")
-            col1, col2 = st.columns(2)
-            with col1:
-                cadre_perc = st.number_input(
-                    "班干部比例(%)", 0.0, 100.0,
-                    float(demo.get("Q4_perc", [28.0, 72.0])[0]),
-                    1.0,
-                    key="cadre_perc",
-                )
-            with col2:
-                st.metric("非班干部比例(%)", f"{100.0 - cadre_perc:.1f}")
-            demo["Q4_perc"] = [cadre_perc, 100.0 - cadre_perc]
+                    st.markdown("**比例设置：**")
+                    cols = st.columns(n_opts)
+                    current = demo["perc"][qkey]
 
-        if demo.get("use_Q5", True):
-            st.markdown("**独生子女比例（独生/非独生）**")
-            col1, col2 = st.columns(2)
-            with col1:
-                only_perc = st.number_input(
-                    "独生子女比例(%)", 0.0, 100.0,
-                    float(demo.get("Q5_perc", [38.0, 62.0])[0]),
-                    1.0,
-                    key="only_perc",
-                )
-            with col2:
-                st.metric("非独生子女比例(%)", f"{100.0 - only_perc:.1f}")
-            # ✅ 注意：这行现在在 if 里面，所以 only_perc 一定存在
-            demo["Q5_perc"] = [only_perc, 100.0 - only_perc]
+                    new_vals = []
+                    running = 0.0
+                    for i, opt_text in enumerate(options):
+                        if i < n_opts - 1:
+                            with cols[i]:
+                                v = st.number_input(
+                                    f"{opt_text}(%)",
+                                    min_value=0.0,
+                                    max_value=100.0,
+                                    value=float(current[i]),
+                                    step=1.0,
+                                    key=f"{qkey}_opt_{i}"
+                                )
+                            max_allowed = max(0.0, 100.0 - running)
+                            v = min(v, max_allowed)
+                            new_vals.append(v)
+                            running += v
+                        else:
+                            last_val = round(max(0.0, 100.0 - running), 1)
+                            with cols[i]:
+                                st.metric(f"{opt_text}(%)", f"{last_val:.1f}")
+                            new_vals.append(last_val)
 
-        # 统一保存 demo 配置
-        cfg["demo"] = demo
+                    demo["perc"][qkey] = normalize_percent_list(new_vals)
+
+                    preview_df = pd.DataFrame({
+                        "编码": list(range(1, n_opts + 1)),
+                        "选项": options,
+                        "比例(%)": demo["perc"][qkey]
+                    })
+                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+            cfg["demo"] = demo
         # --- 题目参数设置（改进的默认值） ---
         st.markdown("### 题目参数设置")
         st.caption("💡 提示：载荷越高、噪声越低，可靠性越高；题目多时适当把噪声调大，可以避免 α 过高。")
@@ -830,8 +834,8 @@ with tabs[1]:
                         st.error("dimensions 不能为空字典")
                     else:
                         demo_obj = new_config.get("demo", {})
-                        for f in ["use_Q1", "use_Q2", "use_Q3", "use_Q4", "use_Q5"]:
-                            demo_obj.setdefault(f, True)
+                        demo_obj.setdefault("enabled", {})
+                        demo_obj.setdefault("perc", {})
                         new_config["demo"] = demo_obj
                         st.session_state.config = new_config
                         st.success("✅ JSON 配置已成功应用！")
@@ -1191,21 +1195,14 @@ with tabs[3]:
 
                 # 值标签
                 value_labels = {}
-                grade_levels_vl = int(demo.get("grade_levels", 3))
-                if grade_levels_vl not in (3, 4):
-                    grade_levels_vl = 3
-                if "Q1" in out.columns:
-                    value_labels["Q1"] = {1: "男", 2: "女"}
-                if "Q2" in out.columns:
-                    value_labels["Q2"] = ({1: "大一", 2: "大二", 3: "大三"}
-                                          if grade_levels_vl == 3
-                                          else {1: "大一", 2: "大二", 3: "大三", 4: "大四"})
-                if "Q3" in out.columns:
-                    value_labels["Q3"] = {1: "城镇", 2: "农村"}
-                if "Q4" in out.columns:
-                    value_labels["Q4"] = {1: "是", 2: "否"}
-                if "Q5" in out.columns:
-                    value_labels["Q5"] = {1: "独生子女", 2: "非独生子女"}
+
+                demo_qs = get_demo_questions(qs, cfg.get("scale_start_qid", 6))
+                for q in demo_qs:
+                    col = f"Q{q['qid']}"
+                    if col in out.columns:
+                        opts = list(q["options"].values())
+                        value_labels[col] = {i + 1: opts[i] for i in range(len(opts))}
+
                 for qid in all_qids:
                     col = f"Q{qid}"
                     if col in out.columns and qid >= scale_start_qid:

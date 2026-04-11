@@ -1257,18 +1257,51 @@ with tabs[1]:
 
 # ---------- Tab 3 ----------
 with tabs[2]:
-    st.subheader("关系约束：各人口学差异・维度相关矩阵・中介模型")
-    cfg = st.session_state.config
-    qs = st.session_state.questions
-    cfg = ensure_demo_effects(cfg, qs)
-    st.session_state.config = cfg
-    if not cfg or not qs:
-        st.info("先完成第 1–2 页。")
-    else:
-        dims = list(cfg.get("dimensions", {}).keys())
-        if len(dims) < 1:
-            st.warning("维度数量不足，请先在第 2 页配置。")
-        else:
+            st.markdown("### 人口学差异（按维度设置 β）")
+            st.caption(
+                "β > 0 表示编码较大的类别均值更高；β < 0 表示编码较大的类别均值更低。"
+                "这一页既支持逐格编辑，也支持从 Excel 直接整块复制粘贴。"
+            )
+
+            cfg = ensure_demo_effects(cfg, qs)
+            df_demo, enabled_demo_qs = build_demo_effects_df(cfg, qs)
+
+            if not enabled_demo_qs:
+                st.info("第二页当前没有启用的人口学变量。")
+            else:
+                cfg["demo_beta_gain"] = st.number_input(
+                    "人口学效应放大系数",
+                    min_value=0.50,
+                    max_value=3.00,
+                    value=float(cfg.get("demo_beta_gain", 1.15)),
+                    step=0.05,
+                    help="系数越大，人口学变量对维度均分的影响越明显。建议 1.00~1.50。"
+                )
+
+                left_col, right_col = st.columns([1.3, 1.0])
+
+                with left_col:
+                    st.markdown("#### 方式1：表格逐格编辑")
+                    df_demo_edit = st.data_editor(
+                        df_demo,
+                        num_rows="fixed",
+                        use_container_width=True,
+                        hide_index=True,
+                        key="demo_effects_editor"
+                    )
+
+                    cfg = apply_demo_effects_df_to_cfg(cfg, df_demo_edit, qs)
+
+                with right_col:
+                    st.markdown("#### 方式2：Excel 整块复制粘贴")
+                    st.caption("先把下面模板复制到 Excel 中修改，再把 Excel 区域整块粘贴回来。")
+
+                    template_tsv = demo_effects_df_to_tsv(df_demo)
+
+                    st.text_area(
+                        "当前β矩阵模板（可复制到 Excel）",
+                        value=template_tsv,
+                        height=180,
                         key="demo_beta_template_area"
                     )
 

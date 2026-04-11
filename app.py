@@ -42,6 +42,11 @@ try:
     HAS_PYREADSTAT = True
 except Exception:
     HAS_PYREADSTAT = False
+try:
+    from scipy import stats
+    HAS_SCIPY = True
+except Exception:
+    HAS_SCIPY = False
 
 st.set_page_config(page_title="问卷解析 + 维度/关系约束 + SPSS数据生成器（本地网页）", layout="wide")
 
@@ -174,6 +179,114 @@ def ensure_demo_config(cfg, qs):
         "perc": new_perc_map,
     }
     return cfg
+def get_enabled_demo_questions(cfg, qs):
+    """获取当前启用的人口学题目"""
+    cfg = ensure_demo_config(cfg, qs)
+    scale_start_qid = int(cfg.get("scale_start_qid", 6))
+    demo_qs = get_demo_questions(qs, scale_start_qid)
+    enabled_map = cfg.get("demo", {}).get("enabled", {})
+    return [q for q in demo_qs if enabled_map.get(f"Q{q['qid']}", True)]
+
+
+def ensure_demo_effects(cfg, qs):
+    """
+    保证 demo_effects 与：
+    1. 当前维度列表
+    2. 当前启用的人口学变量列表
+    始终同步
+    """
+    cfg = ensure_demo_config(cfg, qs)
+
+    dims = list(cfg.get("dimensions", {}).keys())
+    enabled_demo_qs = get_enabled_demo_questions(cfg, qs)
+
+    old = cfg.get("demo_effects", {})
+    if not isinstance(old, dict):
+        old = {}
+
+    new_effects = {}
+    for d in dims:
+        row_old = old.get(d, {})
+        if not isinstance(row_old, dict):
+            row_old = {}
+
+        row_new = {}
+        for q in enabled_demo_qs:
+            qkey = f"Q{q['qid']}"
+            row_new[qkey] = float(row_old.get(qkey, 0.0) or 0.0)
+
+        new_effects[d] = row_new
+
+    cfg["demo_effects"] = new_effects
+    return cfg
+
+
+def format_demo_beta_col(q):
+    """第三页表格列名"""
+    qkey = f"Q{q['qid']}"
+    stem = q["stem"]
+    short_stem = stem if len(stem) <= 12 else stem[:12] + "..."
+    return f"{qkey}｜{short_stem} β"
+
+
+def group_means_text(y, g, label_map=None):
+    """第四页显著性表格里显示各组均值"""
+    y = np.asarray(y, dtype=float)
+    g = np.asarray(g)
+
+    parts = []
+    for code in sorted(pd.unique(g)):
+        mask = (g == code)
+        if mask.sum() == 0:
+            continue
+        label = label_map.get(int(code), str(code)) if label_map else str(code)
+        parts.append(f"{label}(n={mask.sum()}, M={y[mask].mean():.3f})")
+    return "；".join(parts)
+
+
+def _anova_oneway(y, g):
+    """
+    单因素方差分析
+    返回: F, p, eta2
+    """
+    y = np.asarray(y, dtype=float)
+    g = np.asarray(g)
+
+    mask = ~np.isnan(y) & ~pd.isna(g)
+    y = y[mask]
+    g = g[mask]
+
+    codes = sorted(pd.unique(g))
+    groups = [y[g == c] for c in codes]
+    groups = [arr for arr in groups if len(arr) >= 2]
+
+    k = len(groups)
+    n = sum(len(arr) for arr in groups)
+
+    if k < 2 or n <= k:
+        return None, None, None
+
+    grand_mean = y.mean()
+    ss_between = sum(len(arr) * (arr.mean() - grand_mean) ** 2 for arr in groups)
+    ss_within = sum(((arr - arr.mean()) ** 2).sum() for arr in groups)
+
+    df_between = k - 1
+    df_within = n - k
+
+    if df_within <= 0:
+        return None, None, None
+
+    ms_between = ss_between / df_between
+    ms_within = ss_within / df_within
+
+    if ms_within <= 1e-12:
+        return None, None, None
+
+    F = ms_between / ms_within
+    p = float(stats.f.sf(F, df_between, df_within)) if HAS_SCIPY else np.nan
+    eta2 = float(ss_between / (ss_between + ss_within)) if (ss_between + ss_within) > 0 else np.nan
+
+    return F, p, eta2
 
 def generate_latents(n, dim_names, corr_matrix=None, seed=42):
     """改进的潜变量生成，确保相关矩阵得到准确实现"""
@@ -446,27 +559,25 @@ def generate_data_with_subdims(cfg, qs):
                 seed=seed + 7,
             )
 
+
     # ---------- 4) 人口学差异 β 叠加在 Z 上 ----------
+    cfg = ensure_demo_effects(cfg, qs)
     demo_effects = cfg.get("demo_effects", {})
+    enabled_demo_qs = get_enabled_demo_questions(cfg, qs)
+
     for d in dim_names:
         eff = demo_effects.get(d, {})
         if not isinstance(eff, dict):
             eff = {}
-        b_gender = float(eff.get("gender", 0.0) or 0.0)
-        b_grade = float(eff.get("grade", 0.0) or 0.0)
-        b_origin = float(eff.get("origin", 0.0) or 0.0)
-        b_cadre = float(eff.get("cadre", 0.0) or 0.0)
-        b_only = float(eff.get("only", 0.0) or 0.0)
 
-        if any(abs(x) > 0 for x in [b_gender, b_grade, b_origin, b_cadre, b_only]):
-            delta = (
-                b_gender * demo_scores.get("Q1", np.zeros(N))
-                + b_grade * demo_scores.get("Q2", np.zeros(N))
-                + b_origin * demo_scores.get("Q3", np.zeros(N))
-                + b_cadre * demo_scores.get("Q4", np.zeros(N))
-                + b_only * demo_scores.get("Q5", np.zeros(N))
-            )
-            Z[d] = Z[d] + delta
+        delta = np.zeros(N)
+        for q in enabled_demo_qs:
+            qkey = f"Q{q['qid']}"
+            beta = float(eff.get(qkey, 0.0) or 0.0)
+            if abs(beta) > 0:
+                delta += beta * demo_scores.get(qkey, np.zeros(N))
+
+        Z[d] = Z[d] + delta
 
     # ---------- 5) 生成题目数据 Qk（1–5分） ----------
     out = pd.DataFrame({"ID": np.arange(1, N + 1)})
@@ -610,9 +721,7 @@ with tabs[1]:
                    "xs": [],
                    "betas": {},
                 },
-                "demo_effects": {
-                    "A_dim": {"gender": 0.8, "grade": 0.3, "origin": 0.0, "cadre": 0.0, "only": 0.0},  # 增强效应
-                },
+                "demo_effects": {},
             }
 
         cfg = st.session_state.config
@@ -688,6 +797,8 @@ with tabs[1]:
                 if name:
                     new_dims[name] = sorted(set(items))
             cfg["dimensions"] = new_dims
+            cfg = ensure_demo_effects(cfg, qs)
+            st.session_state.config = cfg
 
 
         # --- 人口学变量设置（自动按问卷分类题生成） ---
@@ -858,6 +969,8 @@ with tabs[2]:
     st.subheader("关系约束：各人口学差异・维度相关矩阵・中介模型")
     cfg = st.session_state.config
     qs = st.session_state.questions
+    cfg = ensure_demo_effects(cfg, qs)
+    st.session_state.config = cfg
     if not cfg or not qs:
         st.info("先完成第 1–2 页。")
     else:
@@ -867,51 +980,47 @@ with tabs[2]:
         else:
             st.markdown("### 人口学差异（按维度设置 β）")
             st.caption(
-                "💡 建议：β 在 ±0.3 到 ±1.2 之间效果较好。\n"
-                "性别β：女生更高>0；年级β：高年级更高>0；生源地β：农村生源更高>0；班干部β：班干部更高>0；独生β：独生子女更高>0。"
+                "💡 这里只显示第二页当前已启用的人口学变量。"
+                "β > 0 表示编码较大的类别/等级在该维度上更高；β < 0 则相反。"
             )
 
-            demo_effects = cfg.get("demo_effects")
-            if not isinstance(demo_effects, dict):
-                demo_effects = {}
-            for d in dims:
-                demo_effects.setdefault(d, {})
-                demo_effects[d].setdefault("gender", 0.8)  # 增强默认效应
-                demo_effects[d].setdefault("grade", 0.3)
-                demo_effects[d].setdefault("origin", 0.0)
-                demo_effects[d].setdefault("cadre", 0.0)
-                demo_effects[d].setdefault("only", 0.0)
+            cfg = ensure_demo_effects(cfg, qs)
+            enabled_demo_qs = get_enabled_demo_questions(cfg, qs)
 
-            rows = []
-            for d in dims:
-                eff = demo_effects.get(d, {})
-                rows.append({
-                    "维度": d,
-                    "性别β(女高>0,男高<0)": float(eff.get("gender", 0.8)),
-                    "年级β(高年级高>0)": float(eff.get("grade", 0.3)),
-                    "生源地β(农村高>0)": float(eff.get("origin", 0.0)),
-                    "班干部β(班干部高>0)": float(eff.get("cadre", 0.0)),
-                    "独生β(独生高>0)": float(eff.get("only", 0.0)),
-                })
-            df_demo = pd.DataFrame(rows)
-            df_demo_edit = st.data_editor(df_demo, num_rows="fixed", use_container_width=True, hide_index=True)
+            if not enabled_demo_qs:
+                st.info("第二页当前没有启用的人口学变量。")
+            else:
+                rows = []
+                for d in dims:
+                    row = {"维度": d}
+                    eff = cfg.get("demo_effects", {}).get(d, {})
+                    for q in enabled_demo_qs:
+                        col_name = format_demo_beta_col(q)
+                        qkey = f"Q{q['qid']}"
+                        row[col_name] = float(eff.get(qkey, 0.0))
+                    rows.append(row)
 
-            new_demo_effects = {}
-            for _, row in df_demo_edit.iterrows():
-                dim_name = row["维度"]
-                def _safe(v):
-                    try:
-                        return float(v)
-                    except Exception:
-                        return 0.0
-                new_demo_effects[dim_name] = {
-                    "gender": _safe(row["性别β(女高>0,男高<0)"]),
-                    "grade": _safe(row["年级β(高年级高>0)"]),
-                    "origin": _safe(row["生源地β(农村高>0)"]),
-                    "cadre": _safe(row["班干部β(班干部高>0)"]),
-                    "only": _safe(row["独生β(独生高>0)"]),
-                }
-            cfg["demo_effects"] = new_demo_effects
+                df_demo = pd.DataFrame(rows)
+                df_demo_edit = st.data_editor(
+                    df_demo,
+                    num_rows="fixed",
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                new_demo_effects = {}
+                for _, row in df_demo_edit.iterrows():
+                    dim_name = row["维度"]
+                    new_demo_effects[dim_name] = {}
+                    for q in enabled_demo_qs:
+                        qkey = f"Q{q['qid']}"
+                        col_name = format_demo_beta_col(q)
+                        try:
+                            new_demo_effects[dim_name][qkey] = float(row[col_name])
+                        except Exception:
+                            new_demo_effects[dim_name][qkey] = 0.0
+
+                cfg["demo_effects"] = new_demo_effects
 
             st.markdown("### 维度相关矩阵（任意两个维度之间可设相关）")
             st.caption("💡 建议：相关系数在 ±0.3 到 ±0.7 之间比较合理。对角线固定为 1。")
@@ -1123,50 +1232,77 @@ with tabs[3]:
                     p = 2 * (1.0 - _norm_cdf(abs(t)))
                     return b1, t, p
 
+                enabled_demo_qs = get_enabled_demo_questions(cfg, qs)
+
                 results = []
                 for dim_col in dim_mean_cols:
                     y = out[dim_col].to_numpy()
-                    if "Q1" in out.columns and demo.get("use_Q1", False):
-                        g = (out["Q1"].to_numpy() == 2).astype(int)
-                        diff, t, p = _ttest_binary(y, g)
-                        if p is not None:
+
+                    for q in enabled_demo_qs:
+                        qkey = f"Q{q['qid']}"
+                        if qkey not in out.columns:
+                            continue
+
+                        g = out[qkey].to_numpy()
+                        unique_codes = sorted(pd.unique(g))
+                        if len(unique_codes) < 2:
+                            continue
+
+                        label_map = {i + 1: opt for i, opt in enumerate(q["options"].values())}
+                        q_label = f"{qkey} {q['stem']}"
+
+                        # 两组：t检验
+                        if len(unique_codes) == 2:
+                            low_code = unique_codes[0]
+                            high_code = unique_codes[-1]
+                            g01 = (g == high_code).astype(int)
+
+                            diff, t, p = _ttest_binary(y, g01)
+                            if p is None:
+                                continue
+
                             sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "性别(女 vs 男)", diff, t, p, sig])
-                    if "Q2" in out.columns and demo.get("use_Q2", False):
-                        x = out["Q2"].to_numpy().astype(float)
-                        b1, t, p = _reg_slope(y, x)
-                        if p is not None:
-                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "年级(高年级更高为正)", b1, t, p, sig])
-                    if "Q3" in out.columns and demo.get("use_Q3", False):
-                        g = (out["Q3"].to_numpy() == 2).astype(int)
-                        diff, t, p = _ttest_binary(y, g)
-                        if p is not None:
-                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "生源地(农村 vs 城镇)", diff, t, p, sig])
-                    if "Q4" in out.columns and demo.get("use_Q4", False):
-                        g = (out["Q4"].to_numpy() == 1).astype(int)
-                        diff, t, p = _ttest_binary(y, g)
-                        if p is not None:
-                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "班干部(是 vs 否)", diff, t, p, sig])
-                    if "Q5" in out.columns and demo.get("use_Q5", False):
-                        g = (out["Q5"].to_numpy() == 1).astype(int)
-                        diff, t, p = _ttest_binary(y, g)
-                        if p is not None:
-                            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-                            results.append([dim_col, "独生(独生 vs 非独生)", diff, t, p, sig])
+                            results.append({
+                                "维度均分变量": dim_col,
+                                "人口学变量": q_label,
+                                "检验方法": "独立样本t检验",
+                                "主统计量": round(t, 3),
+                                "p值": round(p, 4),
+                                "效应/比较": f"{label_map[high_code]} - {label_map[low_code]} = {diff:.3f}",
+                                "各组均值": group_means_text(y, g, label_map),
+                                "显著性": sig
+                            })
+
+                        # 三组及以上：单因素方差分析
+                        else:
+                            F, p, eta2 = _anova_oneway(y, g)
+                            if F is None:
+                                continue
+
+                            if np.isnan(p):
+                                sig = "NA"
+                            else:
+                                sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+
+                            results.append({
+                                "维度均分变量": dim_col,
+                                "人口学变量": q_label,
+                                "检验方法": "单因素方差分析",
+                                "主统计量": round(F, 3),
+                                "p值": round(p, 4) if not np.isnan(p) else np.nan,
+                                "效应/比较": f"η² = {eta2:.3f}" if not np.isnan(eta2) else "η² = NA",
+                                "各组均值": group_means_text(y, g, label_map),
+                                "显著性": sig
+                            })
 
                 if results:
-                    df_sig = pd.DataFrame(
-                        results,
-                        columns=["维度均分变量", "人口学变量", "差异/斜率(高-低)", "t值", "p(正态近似)", "显著性"],
-                    )
-                    df_sig["差异/斜率(高-低)"] = df_sig["差异/斜率(高-低)"].round(3)
-                    df_sig["t值"] = df_sig["t值"].round(3)
-                    df_sig["p(正态近似)"] = df_sig["p(正态近似)"].round(4)
-                    st.dataframe(df_sig, use_container_width=True)
-                    st.caption("显著性说明：*** p<.001，** p<.01，* p<.05，ns 不显著（基于正态近似）。")
+                    df_sig = pd.DataFrame(results)
+                    st.dataframe(df_sig, use_container_width=True, hide_index=True)
+
+                    if HAS_SCIPY:
+                        st.caption("显著性说明：*** p<.001，** p<.01，* p<.05，ns 不显著。两组变量采用 t 检验，三组及以上采用单因素方差分析。")
+                    else:
+                        st.caption("未检测到 scipy：两组变量的 t 检验可正常显示；三组及以上变量的 ANOVA p 值需要安装 scipy 后才能完整计算。")
                 else:
                     st.info("当前没有可检验的人口学变量或维度均分列。")
 

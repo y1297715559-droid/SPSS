@@ -166,7 +166,7 @@ def check_all_dimension_reliability(data, dims_map, min_alpha=0.75, min_alpha_sm
         else:
             threshold = min_alpha
 
-        qualified = (not np.isnan(alpha)) and (alpha >= threshold)
+        qualified = (not np.isnan(alpha)) and (alpha >= threshold) and (alpha <= 0.96)
 
         details[dim_name] = {
             "alpha": alpha,
@@ -1257,6 +1257,19 @@ with tabs[1]:
 
 # ---------- Tab 3 ----------
 with tabs[2]:
+    st.subheader("关系约束：各人口学差异・维度相关矩阵・中介模型")
+    cfg = st.session_state.config
+    qs = st.session_state.questions
+    cfg = ensure_demo_effects(cfg, qs)
+    st.session_state.config = cfg
+
+    if not cfg or not qs:
+        st.info("先完成第 1–2 页。")
+    else:
+        dims = list(cfg.get("dimensions", {}).keys())
+        if len(dims) < 1:
+            st.warning("维度数量不足，请先在第 2 页配置。")
+        else:
             st.markdown("### 人口学差异（按维度设置 β）")
             st.caption(
                 "β > 0 表示编码较大的类别均值更高；β < 0 表示编码较大的类别均值更低。"
@@ -1329,8 +1342,11 @@ with tabs[2]:
 
             k = len(dims)
             cm = cfg.get("corr_matrix")
-            if (isinstance(cm, list) and len(cm) == k
-                    and all(isinstance(r, list) and len(r) == k for r in cm)):
+            if (
+                isinstance(cm, list)
+                and len(cm) == k
+                and all(isinstance(r, list) and len(r) == k for r in cm)
+            ):
                 try:
                     base_mat = np.array(cm, dtype=float)
                 except Exception:
@@ -1339,13 +1355,19 @@ with tabs[2]:
                 base_mat = np.eye(k)
 
             df_corr = pd.DataFrame(base_mat, index=dims, columns=dims)
-            df_corr_edit = st.data_editor(df_corr, num_rows="fixed", use_container_width=True, hide_index=True)
+            df_corr_edit = st.data_editor(
+                df_corr,
+                num_rows="fixed",
+                use_container_width=True,
+                hide_index=True,
+                key="corr_editor"
+            )
 
             M = df_corr_edit.values.astype(float)
             for i in range(k):
                 M[i, i] = 1.0
-            M = (M + M.T) / 2.0  # 确保矩阵是对称的
-            np.fill_diagonal(M, 1.0)  # 强制将对角线设为1
+            M = (M + M.T) / 2.0
+            np.fill_diagonal(M, 1.0)
             cfg["corr_matrix"] = M.tolist()
 
             st.markdown("### 多自变量 → 单因变量")
@@ -1392,7 +1414,8 @@ with tabs[2]:
                     df_beta,
                     num_rows="fixed",
                     use_container_width=True,
-                    hide_index=True
+                    hide_index=True,
+                    key="multi_beta_editor"
                 )
 
                 new_betas = {}
@@ -1421,6 +1444,8 @@ with tabs[3]:
     st.subheader("生成并导出（CSV / .sps / .sav）")
     cfg = st.session_state.config
     qs = st.session_state.questions
+    all_qids = sorted([q["qid"] for q in qs]) if qs else []
+    scale_start_qid = int(cfg.get("scale_start_qid", 6)) if cfg else 6
     if not cfg or not qs:
         st.info("先完成前面三步。")
     else:
@@ -1815,7 +1840,7 @@ with tabs[4]:
                     result = calculate_reliability_for_dimension(out, qcols)
                     alpha = result["alpha"]
                     threshold = 0.70 if len(qcols) <= 5 else 0.75
-                    if not np.isnan(alpha) and alpha >= threshold:
+                    if not np.isnan(alpha) and alpha >= threshold and alpha <= 0.96:
                         qualified_dims += 1
                 
                 col1, col2, col3 = st.columns(3)

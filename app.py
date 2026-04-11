@@ -91,6 +91,51 @@ def calculate_reliability_for_dimension(data, item_columns):
         "n_cases": dim_data.shape[0],
         "message": "计算成功"
     }
+def soften_items_if_alpha_too_high(items_array, max_alpha=0.96, min_alpha_guard=0.70, seed=42, max_iter=30):
+    """
+    当某个维度 alpha 过高时，轻微打散题目一致性，避免 alpha > 0.96
+    - items_array: shape = (n_samples, n_items)
+    - max_alpha: 允许的 alpha 上限
+    - min_alpha_guard: 不希望被打散到太低
+    """
+    rng = np.random.default_rng(seed)
+    arr = np.array(items_array, dtype=int).copy()
+
+    cur_alpha = cronbach_alpha(arr)
+    if np.isnan(cur_alpha) or cur_alpha <= max_alpha:
+        return arr
+
+    for step in range(max_iter):
+        cur_alpha = cronbach_alpha(arr)
+        if np.isnan(cur_alpha) or cur_alpha <= max_alpha:
+            break
+
+        excess = cur_alpha - max_alpha
+
+        # alpha 超得越多，扰动比例稍微大一点，但仍然很轻
+        p = min(0.06, max(0.004, 0.012 + excess * 0.35))
+        n_cells = max(1, int(arr.size * p))
+
+        trial = arr.copy()
+
+        rr = rng.integers(0, arr.shape[0], size=n_cells)
+        cc = rng.integers(0, arr.shape[1], size=n_cells)
+        delta = rng.choice([-1, 1], size=n_cells)
+
+        trial[rr, cc] = np.clip(trial[rr, cc] + delta, 1, 5)
+
+        new_alpha = cronbach_alpha(trial)
+        if np.isnan(new_alpha):
+            continue
+
+        old_gap = abs(cur_alpha - max_alpha)
+        new_gap = abs(new_alpha - max_alpha)
+
+        # 只接受“更接近上限、但不打得太散”的方案
+        if new_gap < old_gap and new_alpha >= (min_alpha_guard - 0.03):
+            arr = trial
+
+    return arr
 def check_all_dimension_reliability(data, dims_map, min_alpha=0.75, min_alpha_small=0.70):
     """
     检查所有维度是否达标
@@ -311,7 +356,115 @@ def format_demo_beta_col(q):
     stem = q["stem"]
     short_stem = stem if len(stem) <= 12 else stem[:12] + "..."
     return f"{qkey}｜{short_stem} β"
+def build_demo_effects_df(cfg, qs):
+    cfg = ensure_demo_effects(cfg, qs)
+    dims = list(cfg.get("dimensions", {}).keys())
+    enabled_demo_qs = get_enabled_demo_questions(cfg, qs)
 
+    rows = []
+    for d in dims:
+        row = {"维度": d}
+        eff = cfg.get("demo_effects", {}).get(d, {})
+        for q in enabled_demo_qs:
+            qkey = f"Q{q['qid']}"
+            row[format_demo_beta_col(q)] = float(eff.get(qkey, 0.0) or 0.0)
+        rows.append(row)
+
+    return pd.DataFrame(rows), enabled_demo_qs
+
+
+def apply_demo_effects_df_to_cfg(cfg, df, qs):
+    cfg = ensure_demo_effects(cfg, qs)
+    enabled_demo_qs = get_enabled_demo_questions(cfg, qs)
+
+    new_demo_effects = {}
+    for _, row in df.iterrows():
+        dim_name = str(row["维度"]).strip()
+        new_demo_effects[dim_name] = {}
+
+        for q in enabled_demo_qs:
+            qkey = f"Q{q['qid']}"
+            col_name = format_demo_beta_col(q)
+            try:
+                new_demo_effects[dim_name][qkey] = float(row[col_name])
+            except Exception:
+                new_demo_effects[dim_name][qkey] = 0.0
+
+    cfg["demo_effects"] = new_demo_effects
+    return cfg
+
+
+def demo_effects_df_to_tsv(df):
+    return df.to_csv(index=False, sep="\t")
+
+
+def parse_demo_effects_paste_text(text, cfg, qs):
+    """
+    支持三种粘贴形式：
+    1. 带表头 + 带“维度”列
+    2. 不带表头 + 带“维度”列
+    3. 只有数值区（不带表头、不带维度列），此时按当前维度顺序自动对应
+    """
+    cfg = ensure_demo_effects(cfg, qs)
+    dims = list(cfg.get("dimensions", {}).keys())
+    df_now, enabled_demo_qs = build_demo_effects_df(cfg, qs)
+
+    beta_cols = [format_demo_beta_col(q) for q in enabled_demo_qs]
+    expected_cols = ["维度"] + beta_cols
+
+    raw = text.strip()
+    if not raw:
+        return None, "粘贴内容为空。"
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    rows = [re.split(r"\t|,|，", line) for line in lines]
+    rows = [[cell.strip() for cell in row] for row in rows]
+
+    if not rows:
+        return None, "未识别到有效内容。"
+
+    first = rows[0]
+
+    # 情况1：带表头
+    if len(first) == len(expected_cols) and first[0] == "维度":
+        data_rows = rows[1:]
+        parsed_df = pd.DataFrame(data_rows, columns=expected_cols)
+
+    # 情况2：不带表头，但带维度列
+    elif len(first) == len(expected_cols):
+        parsed_df = pd.DataFrame(rows, columns=expected_cols)
+
+    # 情况3：只有数值区，不带维度列
+    elif len(first) == len(beta_cols):
+        if len(rows) != len(dims):
+            return None, f"当前有 {len(dims)} 个维度；只粘贴数值区时，行数必须等于维度数。"
+        parsed_df = pd.DataFrame(rows, columns=beta_cols)
+        parsed_df.insert(0, "维度", dims)
+
+    else:
+        return None, f"列数不匹配。当前应为 {len(beta_cols)} 个β列，或 {len(expected_cols)} 列（含“维度”列）。"
+
+    parsed_df["维度"] = parsed_df["维度"].astype(str).str.strip()
+
+    unknown_dims = [d for d in parsed_df["维度"] if d not in dims]
+    if unknown_dims:
+        return None, f"存在未识别维度：{unknown_dims}"
+
+    # 用当前矩阵做底表，支持部分覆盖
+    base_df = df_now.copy().set_index("维度")
+    parsed_df = parsed_df.set_index("维度")
+
+    for dim_name in parsed_df.index:
+        for col in beta_cols:
+            if col in parsed_df.columns:
+                val = str(parsed_df.loc[dim_name, col]).strip()
+                if val != "":
+                    try:
+                        base_df.loc[dim_name, col] = float(val)
+                    except Exception:
+                        return None, f"维度「{dim_name}」列「{col}」不是有效数字。"
+
+    return base_df.reset_index(), None
 
 def group_means_text(y, g, label_map=None):
     """第四页显著性表格里显示各组均值"""
@@ -622,10 +775,12 @@ def generate_data_with_subdims(cfg, qs):
 
         if n_opts == 1:
             score = np.zeros(N)
-        elif n_opts == 2:
-            score = np.where(cats == 2, 1.0, -1.0)
         else:
-            score = ((cats.astype(float) - 1) / (n_opts - 1) - 0.5) * 2.0
+            # 按当前真实样本分布做标准化
+            # 这样正负 beta 的效果更稳定，类别不平衡时也更准确
+            raw = cats.astype(float)
+            score = (raw - raw.mean()) / (raw.std(ddof=0) + 1e-8)
+            score = np.clip(score, -2.5, 2.5)
 
         demo_scores[qkey] = score
 
@@ -664,6 +819,7 @@ def generate_data_with_subdims(cfg, qs):
     cfg = ensure_demo_effects(cfg, qs)
     demo_effects = cfg.get("demo_effects", {})
     enabled_demo_qs = get_enabled_demo_questions(cfg, qs)
+    demo_beta_gain = float(cfg.get("demo_beta_gain", 1.15))
 
     for d in dim_names:
         eff = demo_effects.get(d, {})
@@ -675,7 +831,7 @@ def generate_data_with_subdims(cfg, qs):
             qkey = f"Q{q['qid']}"
             beta = float(eff.get(qkey, 0.0) or 0.0)
             if abs(beta) > 0:
-                delta += beta * demo_scores.get(qkey, np.zeros(N))
+                delta += demo_beta_gain * beta * demo_scores.get(qkey, np.zeros(N))
 
         Z[d] = Z[d] + delta
 
@@ -710,11 +866,33 @@ def generate_data_with_subdims(cfg, qs):
             mean=item_mean, loading=item_loading, noise=item_noise,
             seed=seed + 13 + (hash(d) % 1000),
         )
+
+        # 先把本维度题目收集起来（含反向计分）
+        dim_item_dict = {}
         for idx, qid in enumerate(qids):
             x = disc[:, idx]
             if qid in rev:
-                x = 6 - x  # 反向计分
-            out[f"Q{qid}"] = x
+                x = 6 - x
+            dim_item_dict[f"Q{qid}"] = x
+
+        dim_df = pd.DataFrame(dim_item_dict)
+
+        # 小维度和大维度的 alpha 下限保护不同
+        min_alpha_guard = 0.70 if len(qids) <= 5 else 0.75
+
+        # 控制 alpha 不超过 0.96
+        dim_arr = soften_items_if_alpha_too_high(
+            dim_df.to_numpy(),
+            max_alpha=0.96,
+            min_alpha_guard=min_alpha_guard,
+            seed=seed + 79 + (hash(d) % 1000),
+            max_iter=30
+        )
+
+        dim_df = pd.DataFrame(dim_arr, columns=dim_df.columns)
+
+        for col in dim_df.columns:
+            out[col] = dim_df[col].astype(int).to_numpy()
 
     # ---------- 6) 大维度均值（真·算术平均） ----------
     cols = ["ID"]
@@ -822,6 +1000,7 @@ with tabs[1]:
                    "betas": {},
                 },
                 "demo_effects": {},
+                "demo_beta_gain": 1.15,
             }
 
         cfg = st.session_state.config
@@ -1090,49 +1269,27 @@ with tabs[2]:
         if len(dims) < 1:
             st.warning("维度数量不足，请先在第 2 页配置。")
         else:
-            st.markdown("### 人口学差异（按维度设置 β）")
-            st.caption(
-                "💡 这里只显示第二页当前已启用的人口学变量。"
-                "β > 0 表示编码较大的类别/等级在该维度上更高；β < 0 则相反。"
-            )
+                        key="demo_beta_template_area"
+                    )
 
-            cfg = ensure_demo_effects(cfg, qs)
-            enabled_demo_qs = get_enabled_demo_questions(cfg, qs)
+                    pasted_text = st.text_area(
+                        "把 Excel 区域粘贴到这里",
+                        value="",
+                        height=220,
+                        key="demo_beta_paste_area"
+                    )
 
-            if not enabled_demo_qs:
-                st.info("第二页当前没有启用的人口学变量。")
-            else:
-                rows = []
-                for d in dims:
-                    row = {"维度": d}
-                    eff = cfg.get("demo_effects", {}).get(d, {})
-                    for q in enabled_demo_qs:
-                        col_name = format_demo_beta_col(q)
-                        qkey = f"Q{q['qid']}"
-                        row[col_name] = float(eff.get(qkey, 0.0))
-                    rows.append(row)
+                    if st.button("应用粘贴矩阵", key="apply_demo_beta_paste_btn", use_container_width=True):
+                        parsed_df, err = parse_demo_effects_paste_text(pasted_text, cfg, qs)
+                        if err:
+                            st.error(err)
+                        else:
+                            cfg = apply_demo_effects_df_to_cfg(cfg, parsed_df, qs)
+                            st.session_state.config = cfg
+                            st.success("已成功应用粘贴矩阵。")
+                            st.rerun()
 
-                df_demo = pd.DataFrame(rows)
-                df_demo_edit = st.data_editor(
-                    df_demo,
-                    num_rows="fixed",
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                new_demo_effects = {}
-                for _, row in df_demo_edit.iterrows():
-                    dim_name = row["维度"]
-                    new_demo_effects[dim_name] = {}
-                    for q in enabled_demo_qs:
-                        qkey = f"Q{q['qid']}"
-                        col_name = format_demo_beta_col(q)
-                        try:
-                            new_demo_effects[dim_name][qkey] = float(row[col_name])
-                        except Exception:
-                            new_demo_effects[dim_name][qkey] = 0.0
-
-                cfg["demo_effects"] = new_demo_effects
+                st.session_state.config = cfg
 
             st.markdown("### 维度相关矩阵（任意两个维度之间可设相关）")
             st.caption("💡 建议：相关系数在 ±0.3 到 ±0.7 之间比较合理。对角线固定为 1。")
@@ -1278,7 +1435,10 @@ with tabs[3]:
                         
                         if not np.isnan(alpha):
                             threshold = 0.70 if n_items <= 5 else 0.75
-                            if alpha >= threshold:
+                            if alpha > 0.96:
+                                status = "⚠️ 过高（> 0.96）"
+                                all_qualified = False
+                            elif alpha >= threshold:
                                 status = f"✅ 达标（阈值 {threshold:.2f}）"
                             else:
                                 status = f"❌ 不足（阈值 {threshold:.2f}）"
@@ -1553,7 +1713,9 @@ with tabs[4]:
                 # 判断等级
                 threshold = 0.70 if len(qcols) <= 5 else 0.75
 
-                if alpha >= 0.9:
+                if alpha > 0.96:
+                    level = "🟠 过高"
+                elif alpha >= 0.9:
                     level = "🟢 优秀"
                 elif alpha >= 0.8:
                     level = "🟢 良好"
@@ -1580,7 +1742,7 @@ with tabs[4]:
                         st.metric("有效样本", result["n_cases"])
                     
                     # 改进建议
-                    if alpha < threshold:
+                    if alpha < threshold or alpha > 0.96:
                         st.error("⚠️ **改进建议：**")
                         suggestions = []
                         

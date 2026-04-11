@@ -91,6 +91,90 @@ def calculate_reliability_for_dimension(data, item_columns):
         "n_cases": dim_data.shape[0],
         "message": "计算成功"
     }
+def check_all_dimension_reliability(data, dims_map, min_alpha=0.75, min_alpha_small=0.70):
+    """
+    检查所有维度是否达标
+    - 6题及以上：要求 alpha >= min_alpha
+    - 3~5题：要求 alpha >= min_alpha_small
+    """
+    details = {}
+    all_ok = True
+
+    for dim_name, qids in dims_map.items():
+        qcols = [f"Q{qid}" for qid in qids if f"Q{qid}" in data.columns]
+        if len(qcols) < 2:
+            details[dim_name] = {
+                "alpha": np.nan,
+                "qualified": False,
+                "threshold": None,
+                "n_items": len(qcols),
+            }
+            all_ok = False
+            continue
+
+        result = calculate_reliability_for_dimension(data, qcols)
+        alpha = result["alpha"]
+        n_items = len(qcols)
+
+        if n_items <= 5:
+            threshold = min_alpha_small
+        else:
+            threshold = min_alpha
+
+        qualified = (not np.isnan(alpha)) and (alpha >= threshold)
+
+        details[dim_name] = {
+            "alpha": alpha,
+            "qualified": qualified,
+            "threshold": threshold,
+            "n_items": n_items,
+        }
+
+        if not qualified:
+            all_ok = False
+
+    return all_ok, details
+def generate_data_until_reliable(cfg, qs, max_attempts=25, min_alpha=0.75, min_alpha_small=0.70):
+    """
+    自动重复生成，直到所有维度可靠性达标，或者达到最大尝试次数
+    """
+    base_seed = int(cfg.get("seed", 42))
+    dims_map = cfg.get("dimensions", {})
+
+    best_data = None
+    best_details = None
+    best_score = -1e9
+
+    for attempt in range(max_attempts):
+        tmp_cfg = dict(cfg)
+        tmp_cfg["seed"] = base_seed + attempt
+
+        data = generate_data_with_subdims(tmp_cfg, qs)
+        ok, details = check_all_dimension_reliability(
+            data,
+            dims_map,
+            min_alpha=min_alpha,
+            min_alpha_small=min_alpha_small
+        )
+
+        # 评分：越多维度达标越好，alpha 总和越高越好
+        score = 0.0
+        for dim_name, info in details.items():
+            a = info["alpha"]
+            if not np.isnan(a):
+                score += a
+            if info["qualified"]:
+                score += 5.0
+
+        if score > best_score:
+            best_score = score
+            best_data = data
+            best_details = details
+
+        if ok:
+            return data, details, attempt + 1, True
+
+    return best_data, best_details, max_attempts, False
 # ---------- 改进的基础函数 ----------
 
 def parse_survey_text(txt: str):
@@ -389,11 +473,10 @@ def apply_multi_predictors(df_latents, y_dim, x_dims, betas, seed=42):
 
 def latent_to_items(latent, n_items, mean=3.5, loading=0.60, noise=1.00, seed=42):
     """
-    目的：让大维度在题目很多（15~40题）时，α 落在 0.80~0.93 的真实区间
-
-    参数建议：
-    - loading 建议在 0.5~0.7 之间（UI 那里可以默认 0.6）
-    - noise   建议在 0.8~1.3 之间（UI 那里可以默认 1.0）
+    改进版：
+    - 3~5题的小维度自动增强一致性
+    - 题目越少，自动提高载荷、降低噪声、减小题目难度离散
+    - 避免小维度 alpha 过低
     """
     rng = np.random.default_rng(seed)
     n = len(latent)
@@ -401,25 +484,42 @@ def latent_to_items(latent, n_items, mean=3.5, loading=0.60, noise=1.00, seed=42
     # 1) 标准化潜变量
     latent_std = (latent - latent.mean()) / (latent.std() + 1e-8)
 
-    # 2) 每个题的载荷有一点差异，但整体不太高
-    base_loading = loading          # 来自界面
-    item_loadings = rng.normal(base_loading, 0.10, n_items)
-    # clip 到 [0.30, 0.75]，避免过高的题间相关
-    item_loadings = np.clip(item_loadings, 0.30, 0.75)
+    # 2) 根据题目数量自适应调整参数
+    #    题目少 → 提高载荷、降低噪声、减少题间差异
+    if n_items <= 3:
+        adj_loading = max(loading, 0.88)
+        adj_noise = min(noise, 0.38)
+        loading_sd = 0.04
+        diff_sd = 0.15
+    elif n_items <= 5:
+        adj_loading = max(loading, 0.82)
+        adj_noise = min(noise, 0.48)
+        loading_sd = 0.05
+        diff_sd = 0.20
+    elif n_items <= 8:
+        adj_loading = max(loading, 0.75)
+        adj_noise = min(noise, 0.65)
+        loading_sd = 0.07
+        diff_sd = 0.28
+    else:
+        adj_loading = loading
+        adj_noise = noise
+        loading_sd = 0.10
+        diff_sd = 0.40
 
-    # 3) 每道题有一个“难度偏移”（让均值不完全一样）
-    item_diffs = rng.normal(0.0, 0.4, n_items)
+    # 3) 每题载荷：小维度时更集中、更高
+    item_loadings = rng.normal(adj_loading, loading_sd, n_items)
+    item_loadings = np.clip(item_loadings, 0.45, 0.95)
 
-    # 4) 噪声：完全由 noise 控制
-    #    noise 越大，题目间相关越低，α 越低
+    # 4) 每题难度偏移：小维度时缩小离散
+    item_diffs = rng.normal(0.0, diff_sd, n_items)
+
+    # 5) 生成题目
     items = np.zeros((n, n_items), dtype=int)
     for j in range(n_items):
         true_score = item_loadings[j] * latent_std + item_diffs[j]
-        error = rng.normal(0.0, noise, n)   # 这里是测量误差的主力
-
+        error = rng.normal(0.0, adj_noise, n)
         continuous = mean + true_score + error
-
-        # 四舍五入到 1~5
         items[:, j] = np.clip(np.rint(continuous), 1, 5).astype(int)
 
     return items
@@ -714,7 +814,7 @@ with tabs[1]:
                     "enabled": {},
                     "perc": {},                    
                 },
-                "item_params": {"mean": 3.6, "loading": 0.80, "noise": 1.0},  # 改进的默认参数
+                "item_params": {"mean": 3.6, "loading": 0.78, "noise": 0.55},  # 改进的默认参数
                 "corr_matrix": None,
                 "multi_regression": {
                    "y": "A_dim",
@@ -769,14 +869,26 @@ with tabs[1]:
                                 # 实时显示题目数量和可靠性预估
                 selected_items = st.session_state.get(f"dim_items_{i}", valid_default)
                 if len(selected_items) > 0:
-                    reliability_est = min(0.95, 0.4 + 0.05 * len(selected_items))
-                    
-                    if len(selected_items) >= 6:
-                        st.success(f"✅ {len(selected_items)}个题目，预估α≈{reliability_est:.2f}")
-                    elif len(selected_items) >= 4:
-                        st.warning(f"⚠️ {len(selected_items)}个题目，预估α≈{reliability_est:.2f}，建议增加到6个")
+                    cur_params = cfg.get("item_params", {})
+                    cur_loading = float(cur_params.get("loading", 0.78))
+                    cur_noise = float(cur_params.get("noise", 0.55))
+
+                    # 用 Spearman-Brown / alpha 近似思想做更合理的预估
+                    # 先估一个题间平均相关
+                    approx_r = max(0.15, min(0.80, cur_loading * 0.75 - cur_noise * 0.20 + 0.10))
+                    k_items = len(selected_items)
+                    reliability_est = (k_items * approx_r) / (1 + (k_items - 1) * approx_r)
+                    reliability_est = min(0.95, max(0.30, reliability_est))
+
+                    if k_items >= 6:
+                        st.success(f"✅ {k_items}个题目，预估α≈{reliability_est:.2f}")
+                    elif k_items >= 3:
+                        if reliability_est >= 0.75:
+                            st.success(f"✅ {k_items}个题目，预估α≈{reliability_est:.2f}，小维度当前可达标")
+                        else:
+                            st.warning(f"⚠️ {k_items}个题目，预估α≈{reliability_est:.2f}，建议提高载荷或降低噪声")
                     else:
-                        st.error(f"❌ {len(selected_items)}个题目，可靠性可能不足，强烈建议增加题目")
+                        st.error(f"❌ {k_items}个题目，题量过少，可靠性通常不稳定")
                 if st.button("删除本维度", key=f"dim_del_{i}"):
                     delete_keys.append(orig_name)
 
@@ -889,7 +1001,7 @@ with tabs[1]:
             item_params["loading"] = st.number_input(
                 "因子载荷（建议 0.5~0.7）",
                 0.3, 0.9,
-                float(item_params.get("loading", 0.60)),   # 默认 0.60
+                float(item_params.get("loading", 0.78)),   # 默认 0.60
                 0.05,
             )
 
@@ -897,7 +1009,7 @@ with tabs[1]:
             item_params["noise"] = st.number_input(
                 "噪声水平（建议 0.8~1.3）",
                 0.3, 1.5,
-                float(item_params.get("noise", 1.00)),     # 默认 1.00
+                float(item_params.get("noise", 0.55)),     # 默认 1.00
                 0.05,
             )
 
@@ -1129,11 +1241,25 @@ with tabs[3]:
         else:
             # 这里只负责调用统一生成函数
             if st.button("生成数据", type="primary"):
-                out = generate_data_with_subdims(cfg, qs)
-                st.session_state.generated = out
-                st.success(
-                    f"✅ 已生成 {out.shape[0]} 行 × {out.shape[1]} 列数据（小维度 = 题目真·算术平均值）"
+                out, rel_details, used_attempts, fully_ok = generate_data_until_reliable(
+                    cfg,
+                    qs,
+                    max_attempts=25,
+                    min_alpha=0.75,
+                    min_alpha_small=0.70
                 )
+
+                st.session_state.generated = out
+                st.session_state.generated_reliability = rel_details
+
+                if fully_ok:
+                    st.success(
+                        f"✅ 已生成 {out.shape[0]} 行 × {out.shape[1]} 列数据，且所有维度可靠性达标（共尝试 {used_attempts} 次）"
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ 已生成当前最优数据（共尝试 {used_attempts} 次），但仍有部分维度未达标。"
+                    )
                 # 如果你后面想在这里继续做“实时可靠性检查”，
                 # 也可以接着用 out 这个变量来算；注意不要再用 N 这个名字。
                 st.markdown("### 📊 实时可靠性检查")
@@ -1151,10 +1277,11 @@ with tabs[3]:
                         n_items = result["n_items"]
                         
                         if not np.isnan(alpha):
-                            if alpha >= 0.75:
-                                status = "✅ 达标"
+                            threshold = 0.70 if n_items <= 5 else 0.75
+                            if alpha >= threshold:
+                                status = f"✅ 达标（阈值 {threshold:.2f}）"
                             else:
-                                status = "❌ 不足"
+                                status = f"❌ 不足（阈值 {threshold:.2f}）"
                                 all_qualified = False
                             
                             reliability_summary.append({
@@ -1424,11 +1551,13 @@ with tabs[4]:
                     continue
                 
                 # 判断等级
+                threshold = 0.70 if len(qcols) <= 5 else 0.75
+
                 if alpha >= 0.9:
                     level = "🟢 优秀"
                 elif alpha >= 0.8:
                     level = "🟢 良好"
-                elif alpha >= 0.75:
+                elif alpha >= threshold:
                     level = "🟡 可接受"
                 else:
                     level = "🔴 不足"
@@ -1451,7 +1580,7 @@ with tabs[4]:
                         st.metric("有效样本", result["n_cases"])
                     
                     # 改进建议
-                    if alpha < 0.75:
+                    if alpha < threshold:
                         st.error("⚠️ **改进建议：**")
                         suggestions = []
                         
@@ -1483,8 +1612,16 @@ with tabs[4]:
                 
                 # 达标统计
                 total_dims = len(overall_summary)
-                qualified_dims = sum(1 for item in overall_summary 
-                                   if float(item["Cronbach's α"]) >= 0.75)
+                qualified_dims = 0
+                for dim_name, qids in dims_map.items():
+                    qcols = [f"Q{qid}" for qid in qids if f"Q{qid}" in out.columns]
+                    if len(qcols) < 2:
+                        continue
+                    result = calculate_reliability_for_dimension(out, qcols)
+                    alpha = result["alpha"]
+                    threshold = 0.70 if len(qcols) <= 5 else 0.75
+                    if not np.isnan(alpha) and alpha >= threshold:
+                        qualified_dims += 1
                 
                 col1, col2, col3 = st.columns(3)
                 with col1:

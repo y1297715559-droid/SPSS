@@ -1,4 +1,4 @@
-import io
+# import io
 import re
 import json
 import math
@@ -226,7 +226,7 @@ def parse_survey_text(txt: str):
     lines = [l.strip() for l in txt.splitlines() if l.strip()]
     questions = []
     i = 0
-    q_pat = re.compile(r"^(\d+)\s*[\.、]\s*(.+)$")
+    q_pat = re.compile(r"^(\d+)\s*[.．、:：]?\s*(.+)$")
     opt_pat = re.compile(r"^([A-E])\s*[\.、]?\s*(.+)$")
     cur = None
     while i < len(lines):
@@ -243,8 +243,37 @@ def parse_survey_text(txt: str):
                 i += 1
             continue
         i += 1
+
     if cur:
         questions.append(cur)
+
+    # 按题号去重，防止产生重复的 enable_Q1 等控件键
+    unique_questions = {}
+    duplicate_qids = []
+
+    for question in questions:
+        qid = question["qid"]
+
+        if qid in unique_questions:
+            duplicate_qids.append(qid)
+
+        # 同一题号重复时，保留最后一次出现的内容
+        unique_questions[qid] = question
+
+    questions = [
+        unique_questions[qid]
+        for qid in sorted(unique_questions)
+    ]
+
+    if duplicate_qids:
+        duplicate_text = "、".join(
+            str(qid) for qid in sorted(set(duplicate_qids))
+        )
+        st.warning(
+            f"检测到重复题号：{duplicate_text}。"
+            "系统已自动保留最后一次出现的内容。"
+        )
+
     for q in questions:
         opts = " ".join(q["options"].values())
         if any(k in opts for k in ["非常不符合", "不符合", "不确定", "符合", "非常符合"]):
@@ -944,7 +973,13 @@ with tabs[0]:
         if st.button("解析问卷", type="primary", use_container_width=True):
             st.session_state.questions = parse_survey_text(raw)
             st.session_state.raw_text = raw
-            st.success(f"已解析 {len(st.session_state.questions)} 道题。")
+
+            # 清除上一份问卷遗留的配置
+            st.session_state.config = {}
+
+            st.success(
+                f"已解析 {len(st.session_state.questions)} 道题。"
+            )
     with c2:
         if st.button("载入示例", use_container_width=True):
             st.session_state.raw_text = EXAMPLE_SURVEY
